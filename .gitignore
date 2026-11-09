@@ -1,0 +1,23 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Pytest
+.pytest_cache/
+
+# Runtime and local state
+guard_log.jsonl
+state/*.json
+state/events.jsonl
+tests/tmp_state/
+*.log
+
+# Sensitive environment files
+.env
+.env.*
+*.secret
+
+# Explicitly excluded by request
+README.md
+readme.md

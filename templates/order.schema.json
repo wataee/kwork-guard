@@ -1,0 +1,49 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "OrderPassport",
+  "type": "object",
+  "properties": {
+    "order_id": { "type": "string" },
+    "client_name": { "type": "string" },
+    "title": { "type": "string" },
+    "kwork_url": { "type": "string" },
+    "kind": {
+      "type": "string",
+      "enum": ["vpf", "report", "processor", "ext", "intake", "project"]
+    },
+    "status": {
+      "type": "string",
+      "enum": ["lead", "in_progress", "review", "delivered", "warranty", "cancelled"]
+    },
+    "price_rub": { "type": "number" },
+    "prepaid_rub": { "type": "number" },
+    "hours_spent": { "type": "number" },
+    "created_at": { "type": "string" },
+    "deadline": { "type": "string" },
+    "delivered_at": { "type": ["string", "null"] },
+    "config_info": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "version": { "type": "string" },
+        "platform": { "type": "string" }
+      }
+    },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "history": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "ts": { "type": "string" },
+          "event": { "type": "string" },
+          "note": { "type": "string" }
+        }
+      }
+    }
+  },
+  "required": ["order_id", "client_name", "kind", "status", "created_at"]
+}

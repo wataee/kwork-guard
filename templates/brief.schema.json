@@ -1,0 +1,48 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "KworkOrderBrief",
+  "type": "object",
+  "properties": {
+    "order_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "description": "Безопасный идентификатор заказа"
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["vpf", "report", "processor", "ext"],
+      "description": "Тип объекта 1С"
+    },
+    "object_name": {
+      "type": "string",
+      "pattern": "^[A-Za-zА-Яа-я_][A-Za-zА-Яа-я0-9_]*$",
+      "description": "Имя объекта 1С (без пробелов)"
+    },
+    "configuration": {
+      "type": "string",
+      "description": "Название конфигурации 1С"
+    },
+    "target_version": {
+      "type": "string",
+      "description": "Версия платформы или режим совместимости"
+    },
+    "purposes": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Объекты назначения БСП (например Document.ЗаказКлиента)"
+    },
+    "requirements": {
+      "type": "array",
+      "items": { "type": "string" },
+      "minItems": 1,
+      "description": "Список ключевых требований"
+    }
+  },
+  "required": [
+    "order_id",
+    "kind",
+    "object_name",
+    "configuration",
+    "requirements"
+  ]
+}

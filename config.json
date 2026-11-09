@@ -1,0 +1,22 @@
+{
+  "limits": {
+    "max_calls_per_order": 25,
+    "max_response_chars_per_order": 150000,
+    "warn_at_ratio": 0.8
+  },
+  "cache": {
+    "enabled": true,
+    "ttl_sec": 300
+  },
+  "logging": {
+    "max_bytes": 5242880,
+    "backup_count": 3
+  },
+  "workspace": {
+    "orders_dir": "C:\\Orders"
+  },
+  "upstream": {
+    "edt_url": "http://127.0.0.1:8765/mcp",
+    "timeout_sec": 600
+  }
+}
