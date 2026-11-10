@@ -99,13 +99,17 @@ _COMMON = {
 PROFILES: dict[str, Optional[set[str]]] = {
     "vpf": _COMMON | {
         "create_project", "import_project_from_file", "create_metadata", "modify_metadata",
+        "get_metadata_objects", "get_metadata_details", "search_in_code", "read_method_source",
+        "find_references", "validate_query", "list_modules", "get_applications",
         "read_module_source", "write_module_source", "get_template_screenshot",
         "get_module_structure", "build_external_objects",
         "scaffold_vpf", "build_and_check",
     },
     "report": _COMMON | {
         "create_project", "import_project_from_file", "create_metadata", "modify_metadata",
-        "dcs", "search_in_dcs", "validate_query", "read_module_source", "write_module_source",
+        "get_metadata_objects", "get_metadata_details", "search_in_code", "read_method_source",
+        "list_modules", "dcs", "search_in_dcs", "validate_query",
+        "read_module_source", "write_module_source",
         "get_module_structure", "build_external_objects", "build_and_check", "scaffold_report",
     },
     "ext": _COMMON | {
