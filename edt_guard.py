@@ -1006,8 +1006,8 @@ MACRO_IMPL = {
 app = FastAPI(title="edt-guard")
 
 
-def rpc_ok(mid: Any, result: dict) -> JSONResponse:
-    return JSONResponse({"jsonrpc": "2.0", "id": mid, "result": result})
+def rpc_ok(mid: Any, result: dict, headers: Optional[dict[str, str]] = None) -> JSONResponse:
+    return JSONResponse({"jsonrpc": "2.0", "id": mid, "result": result}, headers=headers or {})
 
 
 def rpc_err(mid: Any, code: int, message: str) -> JSONResponse:
@@ -1027,15 +1027,17 @@ async def admin_reset() -> dict:
     return {"reset": True}
 
 
+@app.get("/mcp")
 @app.get("/mcp/{profile}")
 @app.get("/mcp/{profile}/{order_id}")
-async def mcp_get(profile: str, order_id: Optional[str] = None) -> Response:
+async def mcp_get(profile: str = "full", order_id: Optional[str] = None) -> Response:
     return Response(status_code=405)
 
 
+@app.delete("/mcp")
 @app.delete("/mcp/{profile}")
 @app.delete("/mcp/{profile}/{order_id}")
-async def mcp_delete(profile: str, order_id: Optional[str] = None) -> Response:
+async def mcp_delete(profile: str = "full", order_id: Optional[str] = None) -> Response:
     return Response(status_code=200)
 
 
@@ -1131,9 +1133,10 @@ def is_loopback(req: Request) -> bool:
     return host in ("127.0.0.1", "::1", "localhost", "testclient")
 
 
+@app.post("/mcp")
 @app.post("/mcp/{profile}")
 @app.post("/mcp/{profile}/{order_id}")
-async def mcp_post(profile: str, req: Request, order_id: Optional[str] = None) -> Response:
+async def mcp_post(req: Request, profile: str = "full", order_id: Optional[str] = None) -> Response:
     if profile not in PROFILES:
         return rpc_err(None, -32602, f"Неизвестный профиль {profile}. Доступны: {', '.join(PROFILES)}")
     msg = await req.json()
@@ -1143,10 +1146,16 @@ async def mcp_post(profile: str, req: Request, order_id: Optional[str] = None) -
         return Response(status_code=202)
 
     if method == "initialize":
-        return rpc_ok(mid, {
-            "protocolVersion": params.get("protocolVersion", "2025-03-26"),
-            "capabilities": {"tools": {"listChanged": False}},
-            "serverInfo": {"name": f"edt-guard/{profile}", "version": "2.0"}})
+        sid = f"guard-{profile}-{order_id or 'default'}"
+        return rpc_ok(
+            mid,
+            {
+                "protocolVersion": params.get("protocolVersion", "2025-03-26"),
+                "capabilities": {"tools": {"listChanged": False}},
+                "serverInfo": {"name": f"edt-guard/{profile}", "version": "2.0"},
+            },
+            headers={"Mcp-Session-Id": sid},
+        )
     if method == "ping":
         return rpc_ok(mid, {})
     if method == "tools/list":

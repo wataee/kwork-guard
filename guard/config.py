@@ -13,6 +13,7 @@ logger = logging.getLogger("kwork-guard.config")
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 CONFIG_PATH = Path(os.getenv("GUARD_CONFIG", ROOT_DIR / "config.json"))
+ANTIGRAVITY_MCP_CONFIG_PATH = Path.home() / ".gemini" / "config" / "mcp_config.json"
 
 VALID_PROVIDERS = ("antigravity", "openrouter")
 
@@ -155,3 +156,58 @@ def select_model_for_task(
     if normalized_task in coding_types:
         return str(routing.get("coding_tasks") or "anthropic/claude-3-7-sonnet")
     return str(routing.get("coding_tasks") or "anthropic/claude-3-7-sonnet")
+
+
+def get_antigravity_mcp_config_path() -> Path:
+    return ANTIGRAVITY_MCP_CONFIG_PATH
+
+
+def sync_antigravity_mcp_config(
+    profile: str = "full",
+    order_id: str = "default",
+    host: str = "127.0.0.1",
+    port: int = 8766,
+    target_path: Optional[Path] = None,
+    overwrite_existing_url: bool = True,
+) -> Path:
+    target = target_path if target_path is not None else get_antigravity_mcp_config_path()
+    data: dict[str, Any] = {}
+    if target.is_file():
+        try:
+            raw_text = target.read_text(encoding="utf-8").strip()
+            if raw_text:
+                parsed = json.loads(raw_text)
+                if isinstance(parsed, dict):
+                    data = parsed
+        except Exception as exc:
+            logger.warning("Failed to read Antigravity mcp_config %s: %s", target, exc)
+
+    servers = data.get("mcpServers")
+    if not isinstance(servers, dict):
+        servers = {}
+        data["mcpServers"] = servers
+
+    url = f"http://{host}:{port}/mcp/{profile}/{order_id}"
+    if overwrite_existing_url or "edt-guard" not in servers:
+        servers["edt-guard"] = {"url": url}
+        atomic_write_json(target, data)
+
+    return target
+
+
+def is_antigravity_mcp_configured(target_path: Optional[Path] = None) -> tuple[bool, str]:
+    target = target_path if target_path is not None else get_antigravity_mcp_config_path()
+    if not target.is_file():
+        return False, ""
+    try:
+        raw_text = target.read_text(encoding="utf-8").strip()
+        if not raw_text:
+            return False, ""
+        parsed = json.loads(raw_text)
+        servers = parsed.get("mcpServers", {}) if isinstance(parsed, dict) else {}
+        edt_entry = servers.get("edt-guard")
+        if isinstance(edt_entry, dict) and str(edt_entry.get("url") or "").strip():
+            return True, str(edt_entry["url"]).strip()
+    except Exception as exc:
+        logger.warning("Failed to inspect Antigravity mcp_config %s: %s", target, exc)
+    return False, ""

@@ -11,7 +11,7 @@ import socket
 import sys
 from typing import Any
 
-from guard.config import load_config
+from guard.config import is_antigravity_mcp_configured, load_config
 from tools.order import get_orders_dir
 from cockpit.services.onec_runner import OneCRunnerService
 from cockpit.services.guard_runner import GuardRunnerService
@@ -262,7 +262,16 @@ class SystemDoctorService:
 
         agy_online, agy_url = self.guard_runner.check_antigravity_status()
         active_prov = self.guard_runner.get_active_provider()
-        if agy_online:
+        mcp_ok, mcp_url = is_antigravity_mcp_configured()
+        if mcp_ok:
+            extra = f"Шлюз {agy_url} онлайн" if agy_online else "локальный шлюз :3000 не требуется для чата Antigravity"
+            checks.append({
+                "check": "Antigravity Gateway (LLM Dual-Backend)",
+                "status": "OK",
+                "message": f"MCP Antigravity настроен ({mcp_url}); {extra}; провайдер: {active_prov}",
+                "fix": "",
+            })
+        elif agy_online:
             checks.append({
                 "check": "Antigravity Gateway (LLM Dual-Backend)",
                 "status": "OK",
@@ -273,8 +282,8 @@ class SystemDoctorService:
             checks.append({
                 "check": "Antigravity Gateway (LLM Dual-Backend)",
                 "status": "WARN",
-                "message": f"Локальный порт {agy_url} не отвечает (активный провайдер: {active_prov})",
-                "fix": "При необходимости переключите активный провайдер на 'openrouter' или запустите локальный прокси",
+                "message": f"MCP edt-guard не найден в ~/.gemini/config/mcp_config.json (провайдер: {active_prov})",
+                "fix": "Нажмите 'Подготовить рабочее место' в шапке Cockpit",
             })
 
         return checks

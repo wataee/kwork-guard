@@ -16,7 +16,7 @@ from cockpit.services.intake_parser import (
     generate_clarifying_questions,
 )
 from cockpit.services.prompt_builder import PromptBuilderService
-from guard.config import load_config
+from guard.config import load_config, sync_antigravity_mcp_config
 from guard.fs_utils import atomic_write_json, atomic_write_text, write_bsl_with_bom
 from guard.state import OrderManager
 from tools.order import (
@@ -264,7 +264,14 @@ class OrdersFacade:
             except Exception as exc:
                 logger.warning("Read bsl_ai_rules.md error: %s", exc)
 
-        atomic_write_text(order_dir / "CLAUDE.md", "\n".join(parts).strip() + "\n", encoding="utf-8")
+        rules_text = "\n".join(parts).strip() + "\n"
+        atomic_write_text(order_dir / "CLAUDE.md", rules_text, encoding="utf-8")
+        atomic_write_text(order_dir / "AGENTS.md", rules_text, encoding="utf-8")
+
+    def _resolve_antigravity_mcp_target(self) -> Optional[Path]:
+        if self.root_dir.resolve() == ROOT_DIR.resolve():
+            return None
+        return self.root_dir / "state" / "antigravity_mcp_config.json"
 
     def _write_mcp_configs(self, order_dir: Path, mcp_profile: str, order_id: str) -> None:
         cfg_file = self.mcp_configs_dir / f"mcp.{mcp_profile}.json"
@@ -285,6 +292,12 @@ class OrdersFacade:
         roo_dir.mkdir(parents=True, exist_ok=True)
         atomic_write_json(roo_dir / "mcp.json", mcp_cfg)
         atomic_write_json(order_dir / ".mcp.json", mcp_cfg)
+        sync_antigravity_mcp_config(
+            profile=mcp_profile,
+            order_id=order_id,
+            target_path=self._resolve_antigravity_mcp_target(),
+            overwrite_existing_url=True,
+        )
 
     def list_orders(
         self,

@@ -6,6 +6,8 @@ import shutil
 from unittest.mock import patch
 import zipfile
 
+import pytest
+
 from cockpit.app import CockpitApp
 from cockpit.services.intake_parser import IntakeParserService, generate_clarifying_questions
 from cockpit.services.orders_facade import OrdersFacade
@@ -250,7 +252,9 @@ def test_cockpit_ui_v21_workflows(tmp_path: Path) -> None:
                 app.wait_for_background_tasks()
 
             assert (order.order_dir / "CLAUDE.md").is_file()
+            assert (order.order_dir / "AGENTS.md").is_file()
             assert (order.order_dir / ".mcp.json").is_file()
+            assert (tmp_path / "state" / "antigravity_mcp_config.json").is_file()
 
             detail_view.bsl_editor.delete("1.0", "end")
             detail_view.bsl_editor.insert("1.0", "Функция Демо()\n\tВозврат 1;\nКонецФункции")
@@ -344,4 +348,72 @@ def test_guard_runner_error_and_switch_branches(tmp_path: Path) -> None:
              patch("cockpit.services.guard_runner.get_orders_dir", return_value=bad_orders_dir):
             prep = svc.prepare_workplace()
             assert prep["orders_dir_ready"] is False
+
+
+@pytest.mark.asyncio
+async def test_antigravity_mcp_config_sync_and_root_mcp_route(tmp_path: Path) -> None:
+    import httpx
+    import edt_guard
+    from cockpit.services.system_doctor import SystemDoctorService
+    from guard.config import (
+        is_antigravity_mcp_configured,
+        sync_antigravity_mcp_config,
+    )
+
+    mcp_cfg_path = tmp_path / "mcp_config.json"
+    mcp_cfg_path.write_text('{"mcpServers": {"other": {"url": "http://localhost:9999/mcp"}}}', encoding="utf-8")
+
+    ok_before, _ = is_antigravity_mcp_configured(mcp_cfg_path)
+    assert ok_before is False
+
+    sync_antigravity_mcp_config(
+        profile="ext",
+        order_id="demo_1c",
+        target_path=mcp_cfg_path,
+        overwrite_existing_url=True,
+    )
+    ok_after, url_after = is_antigravity_mcp_configured(mcp_cfg_path)
+    assert ok_after is True
+    assert url_after == "http://127.0.0.1:8766/mcp/ext/demo_1c"
+    raw = json.loads(mcp_cfg_path.read_text(encoding="utf-8"))
+    assert "other" in raw["mcpServers"]
+
+    sync_antigravity_mcp_config(
+        profile="full",
+        order_id="default",
+        target_path=mcp_cfg_path,
+        overwrite_existing_url=False,
+    )
+    _, preserved = is_antigravity_mcp_configured(mcp_cfg_path)
+    assert preserved == "http://127.0.0.1:8766/mcp/ext/demo_1c"
+
+    bad_cfg = tmp_path / "bad_mcp_config.json"
+    bad_cfg.write_text("{not json", encoding="utf-8")
+    assert is_antigravity_mcp_configured(bad_cfg) == (False, "")
+    sync_antigravity_mcp_config(target_path=bad_cfg)
+    assert is_antigravity_mcp_configured(bad_cfg)[0] is True
+
+    doctor = SystemDoctorService(root_dir=tmp_path)
+    (tmp_path / "config.json").write_text(json.dumps(DEFAULT_CONFIG), encoding="utf-8")
+    (tmp_path / "requirements.txt").write_text("pytest>=7.0.0\n", encoding="utf-8")
+    with patch("guard.config.ANTIGRAVITY_MCP_CONFIG_PATH", mcp_cfg_path):
+        checks = doctor.run_full_diagnostics()
+        agy_chk = [c for c in checks if "Antigravity Gateway" in c["check"]][0]
+        assert agy_chk["status"] == "OK"
+        assert "demo_1c" in agy_chk["message"]
+
+    transport = httpx.ASGITransport(app=edt_guard.app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        r_get = await client.get("/mcp")
+        assert r_get.status_code == 405
+        r_del = await client.delete("/mcp")
+        assert r_del.status_code == 200
+        r_init = await client.post(
+            "/mcp",
+            json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-03-26"}},
+        )
+        assert r_init.status_code == 200
+        assert "Mcp-Session-Id" in r_init.headers
+        assert r_init.json()["result"]["serverInfo"]["name"] == "edt-guard/full"
+
 

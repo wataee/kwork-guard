@@ -12,7 +12,12 @@ from typing import Any
 import urllib.error
 import urllib.request
 
-from guard.config import get_active_provider, load_config, set_active_provider
+from guard.config import (
+    get_active_provider,
+    load_config,
+    set_active_provider,
+    sync_antigravity_mcp_config,
+)
 from guard.dual_backend import DualBackendClient
 from tools.order import get_orders_dir, repair_order_mcp_config
 
@@ -188,12 +193,21 @@ class GuardRunnerService:
                     if repair_order_mcp_config(item):
                         repaired_orders.append(item.name)
 
+        agy_mcp_target = None if self.root_dir.resolve() == ROOT_DIR.resolve() else (self.state_dir / "antigravity_mcp_config.json")
+        agy_mcp_path = sync_antigravity_mcp_config(
+            profile="full",
+            order_id="default",
+            target_path=agy_mcp_target,
+            overwrite_existing_url=False,
+        )
+
         return {
             "guard_running": guard_ok,
             "guard_message": guard_msg,
             "edt_running": edt_ok,
             "antigravity_online": agy_ok,
             "antigravity_url": agy_url,
+            "antigravity_mcp_config": str(agy_mcp_path),
             "active_provider": self.get_active_provider(),
             "orders_dir": str(orders_dir),
             "orders_dir_ready": dir_accessible,
