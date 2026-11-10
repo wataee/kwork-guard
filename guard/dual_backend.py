@@ -369,7 +369,7 @@ class DualBackendClient:
             agy_key = read_env_api_key(str(agy_cfg.get("api_key_env", "ANTIGRAVITY_API_KEY")), self.root_dir)
             for base_url in self._build_antigravity_urls(cfg):
                 candidates.append(("antigravity", base_url, agy_key))
-            if agy_cfg.get("fallback_to_openrouter", True):
+            if agy_cfg.get("fallback_to_openrouter", False):
                 or_cfg = get_provider_settings("openrouter", cfg)
                 or_url = str(or_cfg.get("base_url") or "https://openrouter.ai/api/v1").rstrip("/")
                 or_key = read_env_api_key(str(or_cfg.get("api_key_env", "OPENROUTER_API_KEY")), self.root_dir)

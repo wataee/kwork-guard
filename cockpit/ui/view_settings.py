@@ -84,10 +84,10 @@ class ViewSettings(customtkinter.CTkScrollableFrame):
         )
         self.provider_menu.grid(row=row + 1, column=0, sticky="ew", padx=14, pady=(0, 8))
 
-        self.fallback_var = customtkinter.BooleanVar(value=True)
+        self.fallback_var = customtkinter.BooleanVar(value=False)
         self.fallback_chk = customtkinter.CTkCheckBox(
             self.config_frame,
-            text="Фоллбэк на OpenRouter при 429 / таймауте",
+            text="Резервный переход на OpenRouter (выкл = строго по отдельности)",
             variable=self.fallback_var,
         )
         self.fallback_chk.grid(row=row + 1, column=1, sticky="w", padx=14, pady=(0, 8))
@@ -190,7 +190,7 @@ class ViewSettings(customtkinter.CTkScrollableFrame):
         self.provider_menu.set(str(cfg_data.get("active_provider", "antigravity")))
         providers = cfg_data.get("providers", {})
         agy_cfg = providers.get("antigravity", {})
-        self.fallback_var.set(bool(agy_cfg.get("fallback_to_openrouter", True)))
+        self.fallback_var.set(bool(agy_cfg.get("fallback_to_openrouter", False)))
 
         self.agy_url_entry.delete(0, "end")
         self.agy_url_entry.insert(0, str(agy_cfg.get("base_url", "http://127.0.0.1:3000/v1")))

@@ -426,4 +426,9 @@ async def test_dual_backend_edge_branches_and_errors(tmp_path: Path) -> None:
             assert ok_200 is True
             assert "3000" in url_200
 
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-test-isolated"}):
+            isolated_cands = client._attempt_candidates(DEFAULT_CONFIG, "antigravity")
+            assert isolated_cands
+            assert all(prov == "antigravity" for prov, _, _ in isolated_cands)
+
 

@@ -26,7 +26,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "antigravity": {
             "base_url": "http://127.0.0.1:3000/v1",
             "api_key_env": "ANTIGRAVITY_API_KEY",
-            "fallback_to_openrouter": True,
+            "fallback_to_openrouter": False,
             "fallback_ports": [3000, 3001],
         },
     },
