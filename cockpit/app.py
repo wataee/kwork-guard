@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import atexit
+from concurrent.futures import Future, ThreadPoolExecutor
 import ctypes
-import json
 import logging
 from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
 import sys
-from typing import Any
+from typing import Any, Callable, Optional
 import customtkinter
 
 from cockpit.services.guard_runner import GuardRunnerService
@@ -60,11 +60,14 @@ class CockpitApp(customtkinter.CTk):
 
         self.base_dir = base_dir or Path(__file__).resolve().parent.parent
         self._enforce_single_instance()
+        self._executor = ThreadPoolExecutor(max_workers=4)
+        self._active_futures: list[Future[Any]] = []
+        self._is_closing = False
 
         customtkinter.set_appearance_mode("Dark")
         customtkinter.set_default_color_theme("blue")
 
-        self.title("Kwork Cockpit 2.0 (Zero-Defect Edition)")
+        self.title("Kwork Cockpit 2.1 (Dual-Backend Zero-Defect)")
         self.geometry("1280x840")
         self.minsize(1024, 680)
 
@@ -76,10 +79,10 @@ class CockpitApp(customtkinter.CTk):
                 LOGGER.warning("Could not set iconbitmap: %s", error)
 
         self.guard_runner = GuardRunnerService(self.base_dir)
-        self.orders_facade = OrdersFacade(self.base_dir)
+        self.orders_facade = OrdersFacade(base_dir=self.base_dir)
         self.intake_parser = IntakeParserService()
         self.prompt_builder = PromptBuilderService(self.base_dir)
-        self.packager = DeliveryPackagerService(self.base_dir)
+        self.packager = DeliveryPackagerService(base_dir=self.base_dir)
         self.onec_runner = OneCRunnerService(self.base_dir)
         self.system_doctor = SystemDoctorService(self.base_dir)
 
@@ -120,6 +123,50 @@ class CockpitApp(customtkinter.CTk):
 
         self.current_view_name = "today"
         self.show_view("today")
+
+    def run_in_background(
+        self,
+        worker: Callable[[], Any],
+        on_done: Optional[Callable[[Any], None]] = None,
+        on_error: Optional[Callable[[Exception], None]] = None,
+    ) -> Future[Any]:
+        def task_wrapper() -> Any:
+            try:
+                res = worker()
+                if on_done and not self._is_closing:
+                    try:
+                        if self.winfo_exists():
+                            self.after(0, lambda: on_done(res))
+                    except Exception as ui_err:
+                        LOGGER.debug("Background completion UI dispatch skipped: %s", ui_err)
+                return res
+            except Exception as exc:
+                LOGGER.error("Background task error: %s", exc, exc_info=True)
+                if on_error and not self._is_closing:
+                    try:
+                        if self.winfo_exists():
+                            self.after(0, lambda: on_error(exc))
+                    except Exception as ui_err:
+                        LOGGER.debug("Background error UI dispatch skipped: %s", ui_err)
+                return None
+
+        future = self._executor.submit(task_wrapper)
+        self._active_futures = [f for f in self._active_futures if not f.done()]
+        self._active_futures.append(future)
+        return future
+
+    def wait_for_background_tasks(self, timeout: float = 10.0) -> None:
+        for fut in list(self._active_futures):
+            try:
+                fut.result(timeout=timeout)
+            except Exception as exc:
+                LOGGER.debug("Waiting future finished with exception: %s", exc)
+        self._active_futures = [f for f in self._active_futures if not f.done()]
+        try:
+            if self.winfo_exists():
+                self.update()
+        except Exception as exc:
+            LOGGER.debug("Update after background tasks skipped: %s", exc)
 
     def _enforce_single_instance(self) -> None:
         state_dir = self.base_dir / "state"
@@ -176,7 +223,7 @@ class CockpitApp(customtkinter.CTk):
 
         version_label = customtkinter.CTkLabel(
             self.sidebar,
-            text="v2.0.0 (Zero-Defect)",
+            text="v2.1.0 (Dual-Backend)",
             text_color="#64748B",
             font=customtkinter.CTkFont(size=11),
         )
@@ -218,7 +265,7 @@ class CockpitApp(customtkinter.CTk):
     def show_notification(self, title: str, message: str, error: bool = False) -> None:
         dialog = customtkinter.CTkToplevel(self)
         dialog.title(title)
-        dialog.geometry("420x180")
+        dialog.geometry("440x200")
         dialog.attributes("-topmost", True)
         dialog.grid_columnconfigure(0, weight=1)
 
@@ -237,7 +284,7 @@ class CockpitApp(customtkinter.CTk):
         body_lbl = customtkinter.CTkLabel(
             frame,
             text=message,
-            wraplength=380,
+            wraplength=400,
             justify="left",
             font=customtkinter.CTkFont(size=12),
         )
@@ -249,13 +296,13 @@ class CockpitApp(customtkinter.CTk):
             width=80,
             command=dialog.destroy,
         )
-        ok_btn.pack(side="bottom", anchor="e", padx=16, pady=(4, 12))
+        ok_btn.pack(side="bottom", pady=12)
 
-
-def run_cockpit() -> None:
-    app = CockpitApp()
-    app.mainloop()
-
-
-if __name__ == "__main__":
-    run_cockpit()
+    def destroy(self) -> None:
+        self._is_closing = True
+        self._cleanup_lock()
+        try:
+            self._executor.shutdown(wait=False, cancel_futures=True)
+        except Exception as exc:
+            LOGGER.debug("Executor shutdown error: %s", exc)
+        super().destroy()

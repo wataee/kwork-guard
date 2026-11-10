@@ -422,3 +422,14 @@ class PlatformContextService:
             lines.append(f"- **{item['name']}** — `{item['signature']}`")
             lines.append(f"  {item['description']}")
         return "\n".join(lines)
+
+    def build_tool_context_hint(self, text: str, max_items: int = 3) -> str:
+        low = text.lower()
+        hints: list[str] = []
+        for type_key, type_doc in self.knowledge.items():
+            if type_key in low or type_doc.name.lower() in low:
+                sigs = [m.signature for m in list(type_doc.methods.values())[:4]]
+                hints.append(f"{type_doc.name}: {', '.join(sigs)}")
+                if len(hints) >= max_items:
+                    break
+        return "\n".join(hints)

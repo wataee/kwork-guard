@@ -6,6 +6,12 @@ from pathlib import Path
 import sys
 import tokenize
 
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from guard.bsl_ls_runner import BslLanguageServerService
+
 TARGET_DIRECTORIES = [
     "guard",
     "cockpit",
@@ -27,6 +33,9 @@ TARGET_FILES = [
     "tests/test_compact_schema.py",
     "tests/test_bsl_linter_v2.py",
     "tests/test_new_macros.py",
+    "tests/test_dual_backend.py",
+    "tests/test_optimization_v21.py",
+    "tests/test_cockpit_v21.py",
 ]
 
 
@@ -113,9 +122,41 @@ def scan_codebase(root_dir: Path) -> list[str]:
     return all_violations
 
 
+def verify_bsl_directory(target_dir: Path, final_validation: bool = False) -> tuple[bool, list[str]]:
+    if not target_dir.is_dir():
+        return True, []
+
+    ls_service = BslLanguageServerService()
+    findings: list[str] = []
+    has_errors = False
+
+    for bsl_file in sorted(target_dir.rglob("*.bsl")):
+        raw_bytes = bsl_file.read_bytes()
+        if not raw_bytes.startswith(b"\xef\xbb\xbf"):
+            findings.append(f"{bsl_file.name}: missing UTF-8 BOM")
+        is_obj = bsl_file.name == "ObjectModule.bsl"
+        diags = ls_service.run_hybrid_diagnostics(
+            bsl_file,
+            final_validation=final_validation,
+            is_object_module=is_obj,
+        )
+        for diag in diags:
+            if diag.severity.upper() in ("ERROR", "CRITICAL"):
+                has_errors = True
+            findings.append(f"{bsl_file.name}:{diag.line}:{diag.col} [{diag.code}] {diag.message}")
+
+    return not has_errors, findings
+
+
 def main() -> int:
     root = Path(__file__).resolve().parent.parent
     violations = scan_codebase(root)
+    if "--bsl" in sys.argv:
+        idx = sys.argv.index("--bsl")
+        bsl_dir = Path(sys.argv[idx + 1]) if idx + 1 < len(sys.argv) else root
+        bsl_ok, bsl_findings = verify_bsl_directory(bsl_dir, final_validation=True)
+        if not bsl_ok:
+            violations.extend(bsl_findings)
     if violations:
         sys.stderr.write(f"Zero-Defect Scan FAILED: {len(violations)} violations found:\n")
         for v in violations:

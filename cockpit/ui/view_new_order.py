@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Any
 import customtkinter
 
+from guard.dual_backend import read_env_api_key
+
 LOGGER = logging.getLogger("cockpit.view_new_order")
 if not LOGGER.handlers:
     _log_dir = Path(__file__).resolve().parent.parent.parent / "logs"
@@ -19,10 +21,18 @@ KIND_LABELS: dict[str, str] = {
     "ВПФ": "vpf",
     "Отчет СКД": "report",
     "Обработка": "processor",
-    "Расширение": "extension",
-    "ТЗ": "tz",
+    "Расширение": "ext",
+    "ТЗ": "intake",
 }
-KIND_REVERSE: dict[str, str] = {v: k for k, v in KIND_LABELS.items()}
+KIND_REVERSE: dict[str, str] = {
+    "vpf": "ВПФ",
+    "report": "Отчет СКД",
+    "processor": "Обработка",
+    "ext": "Расширение",
+    "extension": "Расширение",
+    "intake": "ТЗ",
+    "tz": "ТЗ",
+}
 
 
 class ViewNewOrder(customtkinter.CTkScrollableFrame):
@@ -50,27 +60,65 @@ class ViewNewOrder(customtkinter.CTkScrollableFrame):
         )
         self.intake_label.grid(row=0, column=0, sticky="w", padx=14, pady=(12, 6))
 
-        self.raw_text_box = customtkinter.CTkTextbox(self.intake_frame, height=120)
+        self.raw_text_box = customtkinter.CTkTextbox(self.intake_frame, height=110)
         self.raw_text_box.grid(row=1, column=0, sticky="ew", padx=14, pady=6)
 
+        parse_btn_row = customtkinter.CTkFrame(self.intake_frame, fg_color="transparent")
+        parse_btn_row.grid(row=2, column=0, sticky="w", padx=14, pady=(6, 12))
+
         self.parse_btn = customtkinter.CTkButton(
-            self.intake_frame,
-            text="⚡ Распознать параметры (AI / Regex)",
+            parse_btn_row,
+            text="⚡ Распознать параметры (Regex + Вопросы)",
             fg_color="#0D9488",
             hover_color="#0F766E",
             font=customtkinter.CTkFont(weight="bold"),
             command=self.on_parse_intake,
         )
-        self.parse_btn.grid(row=2, column=0, sticky="w", padx=14, pady=(6, 12))
+        self.parse_btn.pack(side="left", padx=(0, 8))
+
+        self.parse_ai_btn = customtkinter.CTkButton(
+            parse_btn_row,
+            text="🤖 Умный разбор через LLM",
+            fg_color="#2563EB",
+            hover_color="#1D4ED8",
+            command=self.on_parse_intake_llm,
+        )
+        self.parse_ai_btn.pack(side="left")
 
         self.form_frame = customtkinter.CTkFrame(self, fg_color="#1E293B", corner_radius=8)
-        self.form_frame.grid(row=2, column=0, sticky="ew", padx=20, pady=10)
+        self.form_frame.grid(row=2, column=0, sticky="ew", padx=20, pady=8)
         self.form_frame.grid_columnconfigure((0, 1), weight=1)
 
         self._build_form_fields()
 
+        self.questions_frame = customtkinter.CTkFrame(self, fg_color="#1E293B", corner_radius=8)
+        self.questions_frame.grid(row=3, column=0, sticky="ew", padx=20, pady=8)
+        self.questions_frame.grid_columnconfigure(0, weight=1)
+
+        q_header = customtkinter.CTkFrame(self.questions_frame, fg_color="transparent")
+        q_header.grid(row=0, column=0, sticky="ew", padx=14, pady=(10, 4))
+        q_header.grid_columnconfigure(0, weight=1)
+
+        customtkinter.CTkLabel(
+            q_header,
+            text="❓ Уточняющие вопросы клиенту:",
+            font=customtkinter.CTkFont(size=14, weight="bold"),
+        ).grid(row=0, column=0, sticky="w")
+
+        self.copy_questions_btn = customtkinter.CTkButton(
+            q_header,
+            text="📋 Скопировать вопросы для чата Kwork",
+            fg_color="#0D9488",
+            hover_color="#0F766E",
+            command=self.on_copy_questions,
+        )
+        self.copy_questions_btn.grid(row=0, column=1, sticky="e")
+
+        self.questions_box = customtkinter.CTkTextbox(self.questions_frame, height=110)
+        self.questions_box.grid(row=1, column=0, sticky="ew", padx=14, pady=(4, 12))
+
         self.btn_frame = customtkinter.CTkFrame(self, fg_color="transparent")
-        self.btn_frame.grid(row=3, column=0, sticky="ew", padx=20, pady=15)
+        self.btn_frame.grid(row=4, column=0, sticky="ew", padx=20, pady=15)
         self.btn_frame.grid_columnconfigure(0, weight=1)
         self.btn_frame.grid_columnconfigure(1, weight=1)
 
@@ -151,6 +199,45 @@ class ViewNewOrder(customtkinter.CTkScrollableFrame):
         self.object_name_entry = customtkinter.CTkEntry(self.form_frame, placeholder_text="СчетНаОплатуПокупателю")
         self.object_name_entry.grid(row=row + 1, column=1, sticky="ew", padx=14, pady=(0, 14))
 
+    def _apply_parsed_result(self, result: dict[str, Any]) -> None:
+        slug_val = str(result.get("order_id") or "")
+        client_val = str(result.get("client_name") or "")
+        title_val = str(result.get("title") or "")
+        price_val = float(result.get("price_rub") or 0.0)
+        deadline_val = str(result.get("deadline_days") or "")
+        config_val = str(result.get("config_name") or "")
+        object_val = str(result.get("object_name") or "")
+        kind_val = str(result.get("kind") or "vpf")
+        questions_txt = str(result.get("clarifying_questions_text") or "")
+
+        if slug_val:
+            self.slug_entry.delete(0, "end")
+            self.slug_entry.insert(0, slug_val)
+        if client_val:
+            self.client_entry.delete(0, "end")
+            self.client_entry.insert(0, client_val)
+        if title_val:
+            self.title_entry.delete(0, "end")
+            self.title_entry.insert(0, title_val)
+        if price_val > 0:
+            self.price_entry.delete(0, "end")
+            self.price_entry.insert(0, str(int(price_val)))
+        if deadline_val:
+            self.deadline_entry.delete(0, "end")
+            self.deadline_entry.insert(0, f"{deadline_val} дн.")
+        if config_val:
+            self.config_entry.delete(0, "end")
+            self.config_entry.insert(0, config_val)
+        if object_val:
+            self.object_name_entry.delete(0, "end")
+            self.object_name_entry.insert(0, object_val)
+
+        label_kind = KIND_REVERSE.get(kind_val, "ВПФ")
+        self.kind_segmented.set(label_kind)
+
+        self.questions_box.delete("1.0", "end")
+        self.questions_box.insert("1.0", questions_txt)
+
     def on_parse_intake(self) -> None:
         raw_text = self.raw_text_box.get("1.0", "end").strip()
         if not raw_text:
@@ -159,38 +246,44 @@ class ViewNewOrder(customtkinter.CTkScrollableFrame):
 
         try:
             result = self.controller.intake_parser.parse_raw_kwork_text_regex(raw_text)
-            if result.order_slug:
-                self.slug_entry.delete(0, "end")
-                self.slug_entry.insert(0, result.order_slug)
-            if result.client:
-                self.client_entry.delete(0, "end")
-                self.client_entry.insert(0, result.client)
-            if result.title:
-                self.title_entry.delete(0, "end")
-                self.title_entry.insert(0, result.title)
-            if result.price > 0:
-                self.price_entry.delete(0, "end")
-                self.price_entry.insert(0, str(int(result.price)))
-            if result.deadline:
-                self.deadline_entry.delete(0, "end")
-                self.deadline_entry.insert(0, result.deadline)
-            if result.configuration:
-                self.config_entry.delete(0, "end")
-                self.config_entry.insert(0, result.configuration)
-            if result.object_name:
-                self.object_name_entry.delete(0, "end")
-                self.object_name_entry.insert(0, result.object_name)
-
-            label_kind = KIND_REVERSE.get(result.kind, "ВПФ")
-            self.kind_segmented.set(label_kind)
-
+            self._apply_parsed_result(result)
             self.controller.show_notification(
                 "ТЗ распознано",
-                f"Успешно извлечено: клиент '{result.client}', конфигурация '{result.configuration}'",
+                f"Извлечено: клиент '{result.get('client_name')}', конфигурация '{result.get('config_name')}'",
             )
         except Exception as error:
             LOGGER.error("Failed to parse intake text: %s", error, exc_info=True)
             self.controller.show_notification("Ошибка распознавания", str(error), error=True)
+
+    def on_parse_intake_llm(self) -> None:
+        raw_text = self.raw_text_box.get("1.0", "end").strip()
+        if not raw_text:
+            self.controller.show_notification("Интейк", "Введите текст переписки или ТЗ", error=True)
+            return
+
+        base_dir = self.controller.base_dir
+        api_key = read_env_api_key("OPENROUTER_API_KEY", base_dir) or read_env_api_key("ANTIGRAVITY_API_KEY", base_dir) or "antigravity-local"
+
+        def worker() -> dict[str, Any]:
+            return self.controller.intake_parser.parse_raw_kwork_text_llm(raw_text, api_key)
+
+        def done(result: dict[str, Any]) -> None:
+            self._apply_parsed_result(result)
+            self.controller.show_notification(
+                "LLM-разбор завершен",
+                f"Клиент '{result.get('client_name')}', конфигурация '{result.get('config_name')}'",
+            )
+
+        self.controller.run_in_background(worker, on_done=done)
+
+    def on_copy_questions(self) -> None:
+        txt = self.questions_box.get("1.0", "end").strip()
+        if not txt:
+            self.controller.show_notification("Вопросы", "Нет сгенерированных вопросов", error=True)
+            return
+        self.clipboard_clear()
+        self.clipboard_append(txt)
+        self.controller.show_notification("Скопировано", "Уточняющие вопросы скопированы в буфер для чата Kwork")
 
     def on_submit_create(self, open_vscode: bool = False) -> None:
         slug = self.slug_entry.get().strip()
@@ -201,6 +294,8 @@ class ViewNewOrder(customtkinter.CTkScrollableFrame):
         config = self.config_entry.get().strip()
         deadline = self.deadline_entry.get().strip()
         object_name = self.object_name_entry.get().strip()
+        raw_notes = self.raw_text_box.get("1.0", "end").strip()
+        questions_txt = self.questions_box.get("1.0", "end").strip()
 
         try:
             price_val = float(self.price_entry.get().strip().replace(" ", "") or "0")
@@ -220,10 +315,14 @@ class ViewNewOrder(customtkinter.CTkScrollableFrame):
                 configuration=config,
                 deadline=deadline,
                 object_name=object_name,
+                notes=raw_notes,
+                clarifying_questions_text=questions_txt,
             )
 
             if open_vscode:
-                self.controller.onec_runner.open_in_vscode(order_detail.order_dir)
+                self.controller.run_in_background(
+                    lambda: self.controller.onec_runner.open_in_vscode(order_detail.order_dir)
+                )
 
             self.controller.show_notification(
                 "Заказ создан",

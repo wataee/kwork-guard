@@ -1,47 +1,37 @@
-"""
-edt_guard.py — лёгкий MCP-прокси между Roo Code и EDT-MCP.
-
-Что делает:
-  1. Виртуальные профили /mcp/vpf, /mcp/report, /mcp/ext (и /mcp/full для отладки):
-     каждый отдаёт модели только свой белый список инструментов.
-  2. Локальная валидация вызовов до отправки в EDT (modify_metadata и др.).
-  3. Антицикл: повтор провалившегося вызова >= 2 раз и серия ошибок подряд
-     гасятся локальным сообщением «СТОП», без обращения к EDT.
-  4. Макросы: scaffold_vpf (проект + макет + модуль за 1 вызов), build_and_check.
-  5. Обрезка слишком длинных ответов и журнал вызовов (guard_log.jsonl) —
-     по нему видно, где реально уходят токены.
-
-Запуск:  python edt_guard.py        (по умолчанию 127.0.0.1:8766)
-Зависимости: pip install fastapi uvicorn httpx
-
-Настройка через переменные окружения (все необязательные):
-  EDT_MCP_URL     (http://127.0.0.1:8765/mcp)
-  EDT_MCP_TOKEN   Bearer-токен EDT-MCP, если задан в настройках плагина
-  GUARD_PORT      (8766)
-  MAX_RESULT_CHARS (6000)  максимальный размер текста одного ответа
-  MAX_DESC_CHARS   (300)   максимальная длина описания инструмента в tools/list
-"""
 from __future__ import annotations
 
 import asyncio
 import hashlib
 import json
+import logging
+from logging.handlers import RotatingFileHandler
 import os
+from pathlib import Path
 import re
 import time
-from pathlib import Path
 from typing import Any, Optional
 
 import httpx
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 
+from guard.bsl_linter import format_diagnostics_for_llm, lint_bsl_code
 from guard.cache import ReadCache, is_cacheable_read, is_write_tool
-from guard.config import load_config
-from guard.compactor import compact_mcp_result
-from guard.bsl_linter import lint_bsl_code
+from guard.compactor import compact_mcp_result, prune_verified_bsl_history
+from guard.config import get_active_provider, load_config, set_active_provider
+from guard.dual_backend import (
+    DualBackendClient,
+    parse_clean_json_arguments,
+    strip_empty_schema_fields,
+)
+from guard.library import (
+    build_context_attachment,
+    get_snippet,
+    inject_snippets_into_code,
+    list_snippets,
+)
+from guard.platform_context import PlatformContextService
 from guard.state import OrderManager
-from guard.library import list_snippets, get_snippet, inject_snippets_into_code
 from guard.macros import (
     macro_bootstrap_gold,
     macro_scaffold_report,
@@ -56,8 +46,25 @@ from guard.macros import (
     macro_compact_schema,
 )
 
+_LOGS_DIR = Path(__file__).resolve().parent / "logs"
+_LOGS_DIR.mkdir(parents=True, exist_ok=True)
+LOGGER = logging.getLogger("kwork-guard")
+if not LOGGER.handlers:
+    _log_handler = RotatingFileHandler(
+        _LOGS_DIR / "guard_stdout.log",
+        maxBytes=5 * 1024 * 1024,
+        backupCount=3,
+        encoding="utf-8",
+    )
+    _log_handler.setFormatter(logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s"))
+    LOGGER.addHandler(_log_handler)
+    LOGGER.setLevel(logging.INFO)
+
 CONFIG = load_config()
 ORDER_MGR = OrderManager()
+DUAL_CLIENT = DualBackendClient(ORDER_MGR)
+PLATFORM_CTX = PlatformContextService()
+VERIFIED_MODULES: set[str] = set()
 CACHE = ReadCache(
     ttl_sec=CONFIG.get("cache", {}).get("ttl_sec", 300),
     enabled=CONFIG.get("cache", {}).get("enabled", True),
@@ -1053,6 +1060,72 @@ async def admin_extend_order(order_id: str, req: Request, calls: int = 10) -> Re
     return JSONResponse(await ORDER_MGR.extend_order(order_id, calls))
 
 
+@app.get("/admin/provider")
+async def admin_get_provider(req: Request) -> Response:
+    if not is_loopback(req):
+        return JSONResponse({"error": "Forbidden: Loopback only (127.0.0.1)"}, status_code=403)
+    cfg = load_config()
+    active = get_active_provider(cfg)
+    agy_ok, agy_url = DUAL_CLIENT.check_antigravity_health(timeout=0.6)
+    return JSONResponse({
+        "active_provider": active,
+        "antigravity_online": agy_ok,
+        "antigravity_url": agy_url,
+        "providers": cfg.get("providers", {}),
+        "model_routing": cfg.get("model_routing", {}),
+    })
+
+
+@app.post("/admin/provider")
+async def admin_set_provider(req: Request) -> Response:
+    if not is_loopback(req):
+        return JSONResponse({"error": "Forbidden: Loopback only (127.0.0.1)"}, status_code=403)
+    body = await req.json()
+    target = str(body.get("provider", ""))
+    ok, msg = set_active_provider(target)
+    if not ok:
+        return JSONResponse({"ok": False, "error": msg}, status_code=400)
+    return JSONResponse({"ok": True, "active_provider": msg})
+
+
+@app.post("/v1/chat/completions")
+async def llm_chat_completions(req: Request) -> Response:
+    if not is_loopback(req):
+        return JSONResponse({"error": "Forbidden: Loopback only (127.0.0.1)"}, status_code=403)
+    payload = await req.json()
+    headers = dict(req.headers)
+    order_id = ORDER_MGR.resolve_order_id(headers, {}, headers.get("x-order-id"))
+    task_type = headers.get("x-task-type") or str(payload.get("task_type") or "bsl")
+    provider_override = headers.get("x-provider") or None
+
+    raw_messages = payload.get("messages") or []
+    pruned_messages = prune_verified_bsl_history(raw_messages, VERIFIED_MODULES)
+    payload["messages"] = pruned_messages
+
+    last_text = ""
+    for msg in reversed(pruned_messages):
+        if msg.get("role") in ("user", "tool"):
+            last_text = str(msg.get("content") or "")
+            break
+
+    lib_ctx = build_context_attachment(last_text, max_snippets=2)
+    plat_ctx = PLATFORM_CTX.build_tool_context_hint(last_text, max_items=3)
+    dynamic_ctx = "\n".join(part for part in (lib_ctx, plat_ctx) if part)
+
+    try:
+        resp_data, used_provider = await DUAL_CLIENT.chat_completion_async(
+            payload=payload,
+            task_type=task_type,
+            order_id=order_id,
+            dynamic_context=dynamic_ctx,
+            provider_override=provider_override,
+        )
+        return JSONResponse(resp_data, headers={"X-Active-Provider": used_provider})
+    except Exception as exc:
+        LOGGER.error("Dual backend completion failed: %s", exc)
+        return JSONResponse({"error": {"message": str(exc), "type": "proxy_error"}}, status_code=502)
+
+
 def is_loopback(req: Request) -> bool:
     host = req.client.host if req.client else "unknown"
     return host in ("127.0.0.1", "::1", "localhost", "testclient")
@@ -1107,7 +1180,11 @@ async def handle_list(profile: str, mid: Any) -> JSONResponse:
 
 async def handle_call(profile: str, mid: Any, params: dict, req: Request, path_order_id: Optional[str] = None) -> JSONResponse:
     name = params.get("name", "")
-    args = params.get("arguments") or {}
+    raw_args = params.get("arguments")
+    if isinstance(raw_args, str):
+        args = parse_clean_json_arguments(raw_args)
+    else:
+        args = raw_args or {}
     t0 = time.time()
     allow = PROFILES[profile]
     guard = GUARDS[profile]
@@ -1140,18 +1217,18 @@ async def handle_call(profile: str, mid: Any, params: dict, req: Request, path_o
         m_path = str(args.get("modulePath") or "")
         is_obj = "ObjectModule.bsl" in m_path or "МодульОбъекта" in m_path
         issues = lint_bsl_code(src_code, profile=profile, is_object_module=is_obj)
-        err_issues = [i for i in issues if i.severity == "ERROR"]
-        if err_issues:
-            err_msg = "BSL Линтер обнаружил критические ошибки (запись заблокирована без списания бюджета):\n" + "\n".join(f"[{i.code}] Строка {i.line}: {i.message}" for i in err_issues)
+        compact_err = format_diagnostics_for_llm(issues, include_warnings=False)
+        if compact_err:
+            err_msg = "BSL Линтер обнаружил критические ошибки (запись заблокирована без списания бюджета):\n" + compact_err
             await ORDER_MGR.record_call(order_id, name, False, 0, blocked_reason="linter_blocked")
             return done(tool_result(err_msg, True), "linter_error")
 
     if name == "patch_method":
         src_code = str(args.get("new_source") or "")
         issues = lint_bsl_code(src_code, profile=profile, is_object_module=False)
-        err_issues = [i for i in issues if i.severity == "ERROR"]
-        if err_issues:
-            err_msg = "BSL Линтер обнаружил критические ошибки в новом методе (замена заблокирована без списания бюджета):\n" + "\n".join(f"[{i.code}] Строка {i.line}: {i.message}" for i in err_issues)
+        compact_err = format_diagnostics_for_llm(issues, include_warnings=False)
+        if compact_err:
+            err_msg = "BSL Линтер обнаружил критические ошибки в новом методе (замена заблокирована без списания бюджета):\n" + compact_err
             await ORDER_MGR.record_call(order_id, name, False, 0, blocked_reason="linter_blocked")
             return done(tool_result(err_msg, True), "linter_error")
 
@@ -1173,6 +1250,11 @@ async def handle_call(profile: str, mid: Any, params: dict, req: Request, path_o
         await ORDER_MGR.record_call(order_id, name, False, len(err), blocked_reason="prevalidate")
         return done(tool_result(err, True), "prevalidate")
 
+    if get_active_provider() == "antigravity" and isinstance(args, dict):
+        cleaned_args = strip_empty_schema_fields(args)
+        if isinstance(cleaned_args, dict):
+            args = cleaned_args
+
     if is_macro:
         result = await MACRO_IMPL[name](args)
         failed = bool(result.get("isError"))
@@ -1182,6 +1264,8 @@ async def handle_call(profile: str, mid: Any, params: dict, req: Request, path_o
         if not failed and is_write_tool(name):
             hint = args.get("objectName") or args.get("name") or args.get("modulePath") or args.get("methodName")
             CACHE.invalidate_object(project_name, hint)
+            if name == "patch_method" and args.get("modulePath"):
+                VERIFIED_MODULES.add(str(args.get("modulePath")))
         return done(result, "macro", warn=budget_msg)
 
     try:
@@ -1205,6 +1289,8 @@ async def handle_call(profile: str, mid: Any, params: dict, req: Request, path_o
         if is_write_tool(name):
             hint = args.get("objectName") or args.get("name") or args.get("modulePath") or args.get("methodName")
             CACHE.invalidate_object(project_name, hint)
+            if name in ("write_module_source", "patch_method") and args.get("modulePath"):
+                VERIFIED_MODULES.add(str(args.get("modulePath")))
         elif is_cacheable_read(name):
             CACHE.put(project_name, name, args, res)
 

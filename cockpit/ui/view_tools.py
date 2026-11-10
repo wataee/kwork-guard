@@ -5,9 +5,11 @@ import logging
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 import subprocess
-import threading
 from typing import Any
 import customtkinter
+
+from guard.library import verify_library
+from tools.weekly_lessons import DEFAULT_EVENTS_PATH, generate_report
 
 LOGGER = logging.getLogger("cockpit.view_tools")
 if not LOGGER.handlers:
@@ -171,17 +173,17 @@ class ViewTools(customtkinter.CTkFrame):
             btn.grid(row=idx, column=0, sticky="ew", pady=2)
 
     def select_snippet(self, item: dict[str, Any]) -> None:
-        file_path_str = item.get("file", "")
+        file_path_str = item.get("source_file") or item.get("file", "")
         code = ""
         if file_path_str:
             target = self.controller.base_dir / "library" / file_path_str
             if target.exists():
                 try:
-                    code = target.read_text(encoding="utf-8")
+                    code = target.read_text(encoding="utf-8-sig")
                 except Exception as error:
                     LOGGER.error("Failed to read snippet file %s: %s", target, error)
         if not code:
-            code = item.get("code", item.get("description", ""))
+            code = item.get("code", item.get("notes", item.get("description", "")))
 
         self._current_snippet_code = code
         self.preview_title.configure(text=f"Сниппет: {item.get('title', item.get('id', ''))}")
@@ -198,7 +200,6 @@ class ViewTools(customtkinter.CTkFrame):
 
     def on_verify_library(self) -> None:
         try:
-            from tools.library import verify_library
             ok, report = verify_library(self.controller.base_dir)
             self.preview_title.configure(text="Результат проверки базы сниппетов:")
             self.preview_box.delete("1.0", "end")
@@ -210,8 +211,10 @@ class ViewTools(customtkinter.CTkFrame):
 
     def on_generate_lessons(self) -> None:
         try:
-            from tools.lessons import generate_weekly_report
-            report = generate_weekly_report(self.controller.base_dir)
+            events_path = self.controller.base_dir / "state" / "events.jsonl"
+            if not events_path.is_file():
+                events_path = DEFAULT_EVENTS_PATH
+            report = generate_report(events_path)
             self.preview_title.configure(text="Еженедельный отчет по урокам:")
             self.preview_box.delete("1.0", "end")
             self.preview_box.insert("1.0", report)
@@ -225,32 +228,26 @@ class ViewTools(customtkinter.CTkFrame):
         self.preview_box.delete("1.0", "end")
         self.preview_box.insert("1.0", "Запуск unit-тестов. Пожалуйста, подождите...\n")
 
-        def worker() -> None:
-            rc_ok = False
-            output = ""
-            try:
-                proc = subprocess.run(
-                    ["pytest", "tests/", "-v", "--tb=short"],
-                    cwd=str(self.controller.base_dir),
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=60,
-                )
-                output = proc.stdout + "\n" + proc.stderr
-                rc_ok = proc.returncode == 0
-            except Exception as error:
-                LOGGER.error("Pytest execution failed: %s", error, exc_info=True)
-                output = f"Ошибка запуска pytest: {error}"
-            try:
-                if self.winfo_exists():
-                    self.after(0, lambda: self._on_pytest_done(rc_ok, output))
-            except Exception as sched_err:
-                LOGGER.debug("Widget destroyed before pytest thread finished: %s", sched_err)
+        def worker() -> tuple[bool, str]:
+            proc = subprocess.run(
+                ["pytest", "tests/", "-v", "--tb=short"],
+                cwd=str(self.controller.base_dir),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=60,
+            )
+            return proc.returncode == 0, proc.stdout + "\n" + proc.stderr
 
-        thread = threading.Thread(target=worker, daemon=True)
-        thread.start()
+        def done(res: tuple[bool, str]) -> None:
+            rc_ok, output = res
+            self._on_pytest_done(rc_ok, output)
+
+        def on_err(error: Exception) -> None:
+            self._on_pytest_done(False, f"Ошибка запуска pytest: {error}")
+
+        self.controller.run_in_background(worker, on_done=done, on_error=on_err)
 
     def _on_pytest_done(self, success: bool, output: str) -> None:
         self.preview_title.configure(text="Результаты unit-тестов (pytest):")

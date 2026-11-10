@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any
 import customtkinter
 
+from guard.fs_utils import atomic_write_json, atomic_write_text
+
 LOGGER = logging.getLogger("cockpit.view_settings")
 if not LOGGER.handlers:
     _log_dir = Path(__file__).resolve().parent.parent.parent / "logs"
@@ -26,7 +28,7 @@ class ViewSettings(customtkinter.CTkScrollableFrame):
 
         self.title_label = customtkinter.CTkLabel(
             self,
-            text="⚙️ Настройки системы и Диагностика",
+            text="⚙️ Настройки Dual-Backend и Диагностика",
             font=customtkinter.CTkFont(size=22, weight="bold"),
         )
         self.title_label.grid(row=0, column=0, sticky="w", padx=20, pady=(15, 10))
@@ -42,7 +44,7 @@ class ViewSettings(customtkinter.CTkScrollableFrame):
 
         customtkinter.CTkLabel(
             doc_header,
-            text="🩺 Системный Доктор (10 проверок окружения):",
+            text="🩺 Системный Доктор (12 проверок окружения):",
             font=customtkinter.CTkFont(size=14, weight="bold"),
         ).grid(row=0, column=0, sticky="w")
 
@@ -65,7 +67,7 @@ class ViewSettings(customtkinter.CTkScrollableFrame):
 
         customtkinter.CTkLabel(
             self.config_frame,
-            text="Параметры конфигурации:",
+            text="Параметры Dual-Backend, OpenRouter и 1С:",
             font=customtkinter.CTkFont(size=14, weight="bold"),
         ).grid(row=0, column=0, columnspan=2, sticky="w", padx=14, pady=(12, 8))
 
@@ -73,6 +75,48 @@ class ViewSettings(customtkinter.CTkScrollableFrame):
 
     def _build_config_inputs(self) -> None:
         row = 1
+
+        lbl_prov = customtkinter.CTkLabel(self.config_frame, text="Активный LLM-провайдер:")
+        lbl_prov.grid(row=row, column=0, sticky="w", padx=14, pady=(4, 2))
+        self.provider_menu = customtkinter.CTkOptionMenu(
+            self.config_frame,
+            values=["antigravity", "openrouter"],
+        )
+        self.provider_menu.grid(row=row + 1, column=0, sticky="ew", padx=14, pady=(0, 8))
+
+        self.fallback_var = customtkinter.BooleanVar(value=True)
+        self.fallback_chk = customtkinter.CTkCheckBox(
+            self.config_frame,
+            text="Фоллбэк на OpenRouter при 429 / таймауте",
+            variable=self.fallback_var,
+        )
+        self.fallback_chk.grid(row=row + 1, column=1, sticky="w", padx=14, pady=(0, 8))
+
+        row += 2
+
+        lbl_agy_url = customtkinter.CTkLabel(self.config_frame, text="Antigravity Gateway URL:")
+        lbl_agy_url.grid(row=row, column=0, sticky="w", padx=14, pady=(4, 2))
+        self.agy_url_entry = customtkinter.CTkEntry(self.config_frame)
+        self.agy_url_entry.grid(row=row + 1, column=0, sticky="ew", padx=14, pady=(0, 8))
+
+        lbl_agy_key = customtkinter.CTkLabel(self.config_frame, text="Antigravity Key (.env):")
+        lbl_agy_key.grid(row=row, column=1, sticky="w", padx=14, pady=(4, 2))
+        self.agy_key_entry = customtkinter.CTkEntry(self.config_frame, show="*")
+        self.agy_key_entry.grid(row=row + 1, column=1, sticky="ew", padx=14, pady=(0, 8))
+
+        row += 2
+
+        lbl_fast = customtkinter.CTkLabel(self.config_frame, text="Быстрая модель (интейк/сжатие):")
+        lbl_fast.grid(row=row, column=0, sticky="w", padx=14, pady=(4, 2))
+        self.fast_model_entry = customtkinter.CTkEntry(self.config_frame)
+        self.fast_model_entry.grid(row=row + 1, column=0, sticky="ew", padx=14, pady=(0, 8))
+
+        lbl_code = customtkinter.CTkLabel(self.config_frame, text="Модель кода (BSL/СКД/EDT MCP):")
+        lbl_code.grid(row=row, column=1, sticky="w", padx=14, pady=(4, 2))
+        self.code_model_entry = customtkinter.CTkEntry(self.config_frame)
+        self.code_model_entry.grid(row=row + 1, column=1, sticky="ew", padx=14, pady=(0, 8))
+
+        row += 2
 
         lbl_api = customtkinter.CTkLabel(self.config_frame, text="OpenRouter API Key (.env):")
         lbl_api.grid(row=row, column=0, columnspan=2, sticky="w", padx=14, pady=(4, 2))
@@ -132,13 +176,34 @@ class ViewSettings(customtkinter.CTkScrollableFrame):
 
         env_file = self.controller.base_dir / ".env"
         api_key = ""
+        agy_key = ""
         if env_file.exists():
             try:
                 for line in env_file.read_text(encoding="utf-8").splitlines():
                     if line.startswith("OPENROUTER_API_KEY="):
                         api_key = line.split("=", 1)[1].strip().strip('"').strip("'")
+                    elif line.startswith("ANTIGRAVITY_API_KEY="):
+                        agy_key = line.split("=", 1)[1].strip().strip('"').strip("'")
             except Exception as error:
                 LOGGER.error("Failed to read .env: %s", error)
+
+        self.provider_menu.set(str(cfg_data.get("active_provider", "antigravity")))
+        providers = cfg_data.get("providers", {})
+        agy_cfg = providers.get("antigravity", {})
+        self.fallback_var.set(bool(agy_cfg.get("fallback_to_openrouter", True)))
+
+        self.agy_url_entry.delete(0, "end")
+        self.agy_url_entry.insert(0, str(agy_cfg.get("base_url", "http://127.0.0.1:3000/v1")))
+
+        self.agy_key_entry.delete(0, "end")
+        self.agy_key_entry.insert(0, agy_key)
+
+        routing = cfg_data.get("model_routing", {})
+        self.fast_model_entry.delete(0, "end")
+        self.fast_model_entry.insert(0, str(routing.get("fast_tasks", "google/gemini-2.5-flash")))
+
+        self.code_model_entry.delete(0, "end")
+        self.code_model_entry.insert(0, str(routing.get("coding_tasks", "anthropic/claude-3-7-sonnet")))
 
         self.api_key_entry.delete(0, "end")
         self.api_key_entry.insert(0, api_key)
@@ -161,8 +226,20 @@ class ViewSettings(customtkinter.CTkScrollableFrame):
         self.rate_entry.insert(0, str(openrouter_cfg.get("usd_to_rub", 95.0)))
 
     def on_run_diagnostics(self) -> None:
-        try:
-            results = self.controller.system_doctor.run_full_diagnostics()
+        for child in self.doc_results_container.winfo_children():
+            child.destroy()
+        customtkinter.CTkLabel(
+            self.doc_results_container,
+            text="Выполняется проверка окружения...",
+            text_color="#94A3B8",
+        ).grid(row=0, column=0, sticky="w", pady=4)
+
+        def worker() -> list[dict[str, str]]:
+            return self.controller.system_doctor.run_full_diagnostics()
+
+        def done(results: list[dict[str, str]]) -> None:
+            if not self.winfo_exists():
+                return
             for child in self.doc_results_container.winfo_children():
                 child.destroy()
 
@@ -189,10 +266,16 @@ class ViewSettings(customtkinter.CTkScrollableFrame):
                     txt += f"  (Решение: {fix})"
                 customtkinter.CTkLabel(row, text=txt, text_color=color, anchor="w").grid(row=0, column=1, sticky="w")
 
-            self.controller.show_notification("Диагностика", "Все проверки пройдены" if all_ok else "Обнаружены замечания", error=not all_ok)
-        except Exception as error:
-            LOGGER.error("Diagnostics error: %s", error, exc_info=True)
+            self.controller.show_notification(
+                "Диагностика",
+                "Все проверки пройдены" if all_ok else "Обнаружены замечания",
+                error=not all_ok,
+            )
+
+        def on_err(error: Exception) -> None:
             self.controller.show_notification("Ошибка диагностики", str(error), error=True)
+
+        self.controller.run_in_background(worker, on_done=done, on_error=on_err)
 
     def on_save_settings(self) -> None:
         cfg_file = self.controller.base_dir / "config.json"
@@ -211,8 +294,20 @@ class ViewSettings(customtkinter.CTkScrollableFrame):
             self.controller.show_notification("Ошибка ввода", f"Некорректный числовой формат: {err}", error=True)
             return
 
+        active_prov = self.provider_menu.get().strip()
+        cfg_data["active_provider"] = active_prov
         cfg_data["upstream_port"] = edt_port
         cfg_data["guard_port"] = guard_port
+
+        providers = cfg_data.setdefault("providers", {})
+        agy_cfg = providers.setdefault("antigravity", {})
+        agy_cfg["base_url"] = self.agy_url_entry.get().strip() or "http://127.0.0.1:3000/v1"
+        agy_cfg["api_key_env"] = "ANTIGRAVITY_API_KEY"
+        agy_cfg["fallback_to_openrouter"] = bool(self.fallback_var.get())
+
+        routing = cfg_data.setdefault("model_routing", {})
+        routing["fast_tasks"] = self.fast_model_entry.get().strip() or "google/gemini-2.5-flash"
+        routing["coding_tasks"] = self.code_model_entry.get().strip() or "anthropic/claude-3-7-sonnet"
 
         if "onec" not in cfg_data:
             cfg_data["onec"] = {}
@@ -224,18 +319,21 @@ class ViewSettings(customtkinter.CTkScrollableFrame):
         cfg_data["openrouter"]["usd_to_rub"] = usd_rub
 
         try:
-            cfg_file.write_text(json.dumps(cfg_data, indent=2, ensure_ascii=False), encoding="utf-8")
+            atomic_write_json(cfg_file, cfg_data)
 
             api_key = self.api_key_entry.get().strip()
+            agy_key = self.agy_key_entry.get().strip()
             env_file = self.controller.base_dir / ".env"
             env_lines = []
             if env_file.exists():
                 for line in env_file.read_text(encoding="utf-8").splitlines():
-                    if not line.startswith("OPENROUTER_API_KEY="):
+                    if not line.startswith("OPENROUTER_API_KEY=") and not line.startswith("ANTIGRAVITY_API_KEY="):
                         env_lines.append(line)
             env_lines.append(f'OPENROUTER_API_KEY="{api_key}"')
-            env_file.write_text("\n".join(env_lines) + "\n", encoding="utf-8")
+            env_lines.append(f'ANTIGRAVITY_API_KEY="{agy_key}"')
+            atomic_write_text(env_file, "\n".join(env_lines) + "\n", encoding="utf-8")
 
+            self.controller.top_bar.refresh_status()
             self.controller.show_notification("Настройки сохранены", "Конфигурация успешно обновлена")
         except Exception as error:
             LOGGER.error("Save settings error: %s", error, exc_info=True)

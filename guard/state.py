@@ -3,14 +3,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from logging.handlers import RotatingFileHandler
-import os
 from pathlib import Path
 import re
+import threading
 import time
 from typing import Any, Optional
 
 from guard.config import load_config
+from guard.fs_utils import atomic_write_json
 
 logger = logging.getLogger("kwork-guard.state")
 
@@ -43,8 +43,14 @@ class OrderState:
         self.extra_calls_allowed = 0
         self.real_cost_usd = 0.0
         self.real_cost_rub = 0.0
+        self.virtual_cost_usd = 0.0
+        self.virtual_cost_rub = 0.0
+        self.input_tokens = 0
+        self.output_tokens = 0
+        self.economy_mode = False
         self.blocked_calls: list[dict[str, Any]] = []
         self._lock: Optional[asyncio.Lock] = None
+        self._thread_lock = threading.RLock()
 
     def _get_lock(self) -> asyncio.Lock:
         if self._lock is None:
@@ -62,6 +68,11 @@ class OrderState:
             "extra_calls_allowed": self.extra_calls_allowed,
             "real_cost_usd": self.real_cost_usd,
             "real_cost_rub": self.real_cost_rub,
+            "virtual_cost_usd": self.virtual_cost_usd,
+            "virtual_cost_rub": self.virtual_cost_rub,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "economy_mode": self.economy_mode,
             "blocked_calls": self.blocked_calls,
         }
 
@@ -74,18 +85,20 @@ class OrderState:
         self.extra_calls_allowed = data.get("extra_calls_allowed", 0)
         self.real_cost_usd = float(data.get("real_cost_usd", 0.0))
         self.real_cost_rub = float(data.get("real_cost_rub", 0.0))
+        self.virtual_cost_usd = float(data.get("virtual_cost_usd", 0.0))
+        self.virtual_cost_rub = float(data.get("virtual_cost_rub", 0.0))
+        self.input_tokens = int(data.get("input_tokens", 0))
+        self.output_tokens = int(data.get("output_tokens", 0))
+        self.economy_mode = bool(data.get("economy_mode", False))
         self.blocked_calls = data.get("blocked_calls", [])
 
     def save(self) -> None:
-        self.updated_at = int(time.time())
-        self.state_file.parent.mkdir(parents=True, exist_ok=True)
-        tmp_file = self.state_file.with_suffix(".tmp")
-        try:
-            with tmp_file.open("w", encoding="utf-8") as file_handle:
-                json.dump(self.to_dict(), file_handle, ensure_ascii=False, indent=2)
-            tmp_file.replace(self.state_file)
-        except Exception as exc:
-            logger.error("State save failure for %s: %s", self.order_id, exc)
+        with self._thread_lock:
+            self.updated_at = int(time.time())
+            try:
+                atomic_write_json(self.state_file, self.to_dict())
+            except Exception as exc:
+                logger.error("State save failure for %s: %s", self.order_id, exc)
 
 
 class OrderManager:
@@ -96,6 +109,7 @@ class OrderManager:
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.orders: dict[str, OrderState] = {}
         self._manager_lock: Optional[asyncio.Lock] = None
+        self._thread_lock = threading.RLock()
 
     def _get_lock(self) -> asyncio.Lock:
         if self._manager_lock is None:
@@ -127,9 +141,9 @@ class OrderManager:
 
         return "default"
 
-    async def get_order(self, order_id: str) -> OrderState:
+    def get_order_sync(self, order_id: str) -> OrderState:
         safe_id = sanitize_order_id(order_id)
-        async with self._get_lock():
+        with self._thread_lock:
             if safe_id in self.orders:
                 return self.orders[safe_id]
 
@@ -147,6 +161,10 @@ class OrderManager:
 
             self.orders[safe_id] = state
             return state
+
+    async def get_order(self, order_id: str) -> OrderState:
+        async with self._get_lock():
+            return self.get_order_sync(order_id)
 
     async def check_budget(self, order_id: str, tool_name: str) -> tuple[bool, Optional[str]]:
         config = load_config()
@@ -217,6 +235,7 @@ class OrderManager:
             state.total_response_chars = 0
             state.errors_count = 0
             state.extra_calls_allowed = 0
+            state.economy_mode = False
             state.blocked_calls.clear()
             state.save()
             return state.to_dict()

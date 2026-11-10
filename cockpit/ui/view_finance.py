@@ -32,7 +32,7 @@ class ViewFinance(customtkinter.CTkFrame):
 
         self.title_label = customtkinter.CTkLabel(
             self.top_frame,
-            text="📊 Финансовая аналитика и маржинальность",
+            text="📊 Финансовая аналитика и чистая маржа",
             font=customtkinter.CTkFont(size=22, weight="bold"),
         )
         self.title_label.grid(row=0, column=0, sticky="w")
@@ -64,17 +64,17 @@ class ViewFinance(customtkinter.CTkFrame):
         self.kpi_revenue = customtkinter.CTkLabel(self.kpi_frame, text="Выручка\n0 ₽", font=customtkinter.CTkFont(size=14, weight="bold"), text_color="#10B981")
         self.kpi_revenue.grid(row=0, column=0, padx=10, pady=12)
 
+        self.kpi_net_margin = customtkinter.CTkLabel(self.kpi_frame, text="Чистая маржа\n0 ₽", font=customtkinter.CTkFont(size=14, weight="bold"), text_color="#38BDF8")
+        self.kpi_net_margin.grid(row=0, column=1, padx=10, pady=12)
+
         self.kpi_ai_cost = customtkinter.CTkLabel(self.kpi_frame, text="Расход AI\n0.00 ₽", font=customtkinter.CTkFont(size=14, weight="bold"), text_color="#EF4444")
-        self.kpi_ai_cost.grid(row=0, column=1, padx=10, pady=12)
+        self.kpi_ai_cost.grid(row=0, column=2, padx=10, pady=12)
 
-        self.kpi_margin = customtkinter.CTkLabel(self.kpi_frame, text="Маржинальность\n100%", font=customtkinter.CTkFont(size=14, weight="bold"), text_color="#38BDF8")
-        self.kpi_margin.grid(row=0, column=2, padx=10, pady=12)
+        self.kpi_margin = customtkinter.CTkLabel(self.kpi_frame, text="Маржа %\n100%", font=customtkinter.CTkFont(size=14, weight="bold"))
+        self.kpi_margin.grid(row=0, column=3, padx=10, pady=12)
 
-        self.kpi_rate = customtkinter.CTkLabel(self.kpi_frame, text="Ставка ₽/ч\n0 ₽/ч", font=customtkinter.CTkFont(size=14, weight="bold"))
-        self.kpi_rate.grid(row=0, column=3, padx=10, pady=12)
-
-        self.kpi_pipeline = customtkinter.CTkLabel(self.kpi_frame, text="В пайплайне\n0 ₽", font=customtkinter.CTkFont(size=14, weight="bold"), text_color="#F59E0B")
-        self.kpi_pipeline.grid(row=0, column=4, padx=10, pady=12)
+        self.kpi_rate = customtkinter.CTkLabel(self.kpi_frame, text="Ставка ₽/ч\n0 ₽/ч", font=customtkinter.CTkFont(size=14, weight="bold"), text_color="#F59E0B")
+        self.kpi_rate.grid(row=0, column=4, padx=10, pady=12)
 
         self.table_scroll = customtkinter.CTkScrollableFrame(self, fg_color="transparent")
         self.table_scroll.grid(row=2, column=0, sticky="nsew", padx=20, pady=(4, 15))
@@ -85,11 +85,15 @@ class ViewFinance(customtkinter.CTkFrame):
     def load_data(self) -> None:
         try:
             summary = self.controller.orders_facade.get_financial_summary()
-            self.kpi_revenue.configure(text=f"Выручка\n{summary.delivered_value:,.0f} ₽".replace(",", " "))
-            self.kpi_ai_cost.configure(text=f"Расход AI\n{summary.total_real_ai_cost_rub:.2f} ₽")
-            self.kpi_margin.configure(text=f"Маржинальность\n{summary.margin_percent:.0f}%")
+            self.kpi_revenue.configure(text=f"Сдано (выручка)\n{summary.delivered_value:,.0f} ₽".replace(",", " "))
+            self.kpi_net_margin.configure(text=f"Чистая маржа\n{summary.total_net_margin_rub:,.0f} ₽".replace(",", " "))
+            if summary.total_virtual_cost_rub > 0 and summary.total_real_ai_cost_rub == 0:
+                ai_txt = f"Расход AI\n0.00 ₽ (подписка ~{summary.total_virtual_cost_rub:.1f} ₽)"
+            else:
+                ai_txt = f"Расход AI\n{summary.total_real_ai_cost_rub:.2f} ₽"
+            self.kpi_ai_cost.configure(text=ai_txt)
+            self.kpi_margin.configure(text=f"Маржа %\n{summary.margin_percent:.0f}%")
             self.kpi_rate.configure(text=f"Ставка ₽/ч\n{summary.hourly_rate:,.0f} ₽/ч".replace(",", " "))
-            self.kpi_pipeline.configure(text=f"В пайплайне\n{summary.in_progress_value:,.0f} ₽".replace(",", " "))
 
             self._cached_orders = self.controller.orders_facade.list_orders()
             self._render_table(self._cached_orders)
@@ -118,18 +122,23 @@ class ViewFinance(customtkinter.CTkFrame):
             txt = f"{order.order_id}  |  {order.client}  |  {order.title}"
             customtkinter.CTkLabel(left, text=txt, font=customtkinter.CTkFont(weight="bold")).pack(anchor="w")
 
-            sub = f"{order.kind.upper()}  •  Статус: {order.stage}  •  Часы: {order.hours_spent:.1f} ч"
+            warn_tag = "  •  ⚠ API > 5% (Эконом)" if order.is_api_over_threshold else ""
+            sub = (
+                f"{order.kind.upper()}  •  Статус: {order.stage}  •  "
+                f"Комиссия Kwork: {order.kwork_fee_rub:,.0f} ₽  •  "
+                f"API: {order.cost_rub:.2f} ₽ (вирт: {order.virtual_cost_rub:.2f} ₽){warn_tag}"
+            ).replace(",", " ")
             customtkinter.CTkLabel(left, text=sub, font=customtkinter.CTkFont(size=11), text_color="#94A3B8").pack(anchor="w")
 
             right = customtkinter.CTkFrame(row_frame, fg_color="transparent")
             right.grid(row=0, column=1, sticky="e", padx=12, pady=8)
 
-            price_str = f"{order.price:,.0f} ₽".replace(",", " ")
+            margin_str = f"Маржа: {order.net_margin_rub:,.0f} ₽ ({order.price:,.0f} ₽)".replace(",", " ")
             customtkinter.CTkLabel(
                 right,
-                text=price_str,
-                font=customtkinter.CTkFont(size=14, weight="bold"),
-                text_color="#10B981",
+                text=margin_str,
+                font=customtkinter.CTkFont(size=13, weight="bold"),
+                text_color="#10B981" if order.net_margin_rub >= 0 else "#EF4444",
             ).pack(side="right", padx=6)
 
     def on_export_csv(self) -> None:
@@ -141,7 +150,11 @@ class ViewFinance(customtkinter.CTkFrame):
             target_file.parent.mkdir(parents=True, exist_ok=True)
             with target_file.open("w", newline="", encoding="utf-8-sig") as file_handle:
                 writer = csv.writer(file_handle, delimiter=";")
-                writer.writerow(["Order ID", "Client", "Title", "Kind", "Stage", "Price", "Hours", "MCP Calls"])
+                writer.writerow([
+                    "Order ID", "Client", "Title", "Kind", "Stage",
+                    "Price", "Kwork Fee", "API Cost RUB", "Virtual Cost RUB",
+                    "Net Margin RUB", "Hours", "MCP Calls", "Economy Mode",
+                ])
                 for order in self._cached_orders:
                     writer.writerow([
                         order.order_id,
@@ -150,8 +163,13 @@ class ViewFinance(customtkinter.CTkFrame):
                         order.kind,
                         order.stage,
                         order.price,
+                        order.kwork_fee_rub,
+                        order.cost_rub,
+                        order.virtual_cost_rub,
+                        order.net_margin_rub,
                         order.hours_spent,
                         order.mcp_calls,
+                        order.economy_mode,
                     ])
             self.controller.show_notification("Экспорт завершен", f"Файл сохранен:\n{target_file.name}")
         except Exception as error:

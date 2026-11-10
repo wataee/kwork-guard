@@ -260,4 +260,21 @@ class SystemDoctorService:
                 "fix": "Установите OpenJDK/Temurin 17+ для поддержки BSL Language Server в режиме MCP",
             })
 
+        agy_online, agy_url = self.guard_runner.check_antigravity_status()
+        active_prov = self.guard_runner.get_active_provider()
+        if agy_online:
+            checks.append({
+                "check": "Antigravity Gateway (LLM Dual-Backend)",
+                "status": "OK",
+                "message": f"Шлюз доступен ({agy_url}), активен провайдер: {active_prov}",
+                "fix": "",
+            })
+        else:
+            checks.append({
+                "check": "Antigravity Gateway (LLM Dual-Backend)",
+                "status": "WARN",
+                "message": f"Локальный порт {agy_url} не отвечает (активный провайдер: {active_prov})",
+                "fix": "При необходимости переключите активный провайдер на 'openrouter' или запустите локальный прокси",
+            })
+
         return checks

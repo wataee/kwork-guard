@@ -7,22 +7,24 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 import re
 from typing import Any
-import urllib.error
-import urllib.request
+
+from guard.config import load_config, select_model_for_task
+from guard.dual_backend import DualBackendClient
 
 ROOT_DIR = Path(__file__).resolve().parent.parent.parent
 LOGS_DIR = ROOT_DIR / "logs"
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 logger = logging.getLogger("cockpit.intake_parser")
-log_handler = RotatingFileHandler(
-    LOGS_DIR / "cockpit.log",
-    maxBytes=5 * 1024 * 1024,
-    backupCount=3,
-    encoding="utf-8",
-)
-logger.addHandler(log_handler)
-logger.setLevel(logging.INFO)
+if not logger.handlers:
+    log_handler = RotatingFileHandler(
+        LOGS_DIR / "cockpit.log",
+        maxBytes=5 * 1024 * 1024,
+        backupCount=3,
+        encoding="utf-8",
+    )
+    logger.addHandler(log_handler)
+    logger.setLevel(logging.INFO)
 
 CYR_TO_LAT = {
     "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "yo",
@@ -49,9 +51,53 @@ def transliterate(text: str) -> str:
     return cleaned if cleaned else "Order"
 
 
+def generate_clarifying_questions(parsed_data: dict[str, Any], raw_text: str) -> list[str]:
+    low = raw_text.lower()
+    questions: list[str] = []
+
+    cfg_name = str(parsed_data.get("config_name") or "")
+    has_release_num = bool(re.search(r"\b(?:3\.0\.\d+|11\.\d+(?:\.\d+)?|2\.\d+(?:\.\d+)?)\b", low))
+    if cfg_name in ("1С:Предприятие 8.3", "") or not has_release_num:
+        questions.append(
+            "1. Подскажите, пожалуйста, точную конфигурацию и номер релиза вашей базы 1С "
+            "(например: УНФ 3.0.9, УТ 11.5.17, БП 3.0.150)?"
+        )
+
+    has_mode = bool(re.search(r"(?i)\b(?:файлов\w+|сервер\w+|фреш|fresh|облак\w+|локальн\w+)\b", low))
+    if not has_mode:
+        questions.append(
+            "2. В каком режиме работает база: файловая, клиент-серверная или облако (1С:Фреш)? "
+            "(Для 1С:Фреш есть строгие ограничения на безопасный режим и фоновые задания)."
+        )
+
+    has_output = bool(re.search(r"(?i)\b(?:pdf|excel|xlsx|mxl|табличн\w+|бсп|кнопк\w+|подсистем\w+|макет)\b", low))
+    if not has_output:
+        questions.append(
+            "3. В каком формате нужен итоговый результат: внешняя печатная форма (.epf) / отчет СКД (.erf) "
+            "под БСП или расширение (.cfe)? Нужна ли выгрузка в Excel/PDF?"
+        )
+
+    has_access = bool(re.search(r"(?i)\b(?:\.dt|выгрузк\w+|тестов\w+\s+баз|anydesk|teamviewer|рдп|rdp|доступ)\b", low))
+    if not has_access:
+        questions.append(
+            "4. Как планируем тестировать разработку: сможете предоставить тестовую выгрузку (.dt) / "
+            "копию базы или достаточно готового файла для вашей самостоятельной проверки?"
+        )
+
+    return questions
+
+
+def format_clarifying_questions_text(questions: list[str]) -> str:
+    if not questions:
+        return "В ТЗ указаны все базовые технические детали для старта разработки."
+    intro = "Добрый день! Изучил задачу — чтобы точно оценить и сделать без переделок, уточните пару деталей:"
+    return intro + "\n\n" + "\n".join(questions)
+
+
 class IntakeParserService:
-    def __init__(self) -> None:
+    def __init__(self, dual_client: DualBackendClient | None = None) -> None:
         self.default_model = "google/gemini-2.5-flash"
+        self.dual_client = dual_client if dual_client else DualBackendClient()
 
     def parse_raw_kwork_text_regex(self, raw_text: str) -> dict[str, Any]:
         text = raw_text.strip()
@@ -61,10 +107,6 @@ class IntakeParserService:
             or re.search(r"№\s*(\d+)", text)
             or re.search(r"заказ[^\d]{1,10}(\d+)", text, re.IGNORECASE)
         )
-        if order_id_match:
-            raw_id = f"kwork_{order_id_match.group(1)}"
-        else:
-            raw_id = f"order_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}"
 
         client_match = (
             re.search(r"kwork\.ru/user/([a-zA-Z0-9_-]+)", text, re.IGNORECASE)
@@ -119,7 +161,7 @@ class IntakeParserService:
         if len(clean_title) > 80:
             clean_title = clean_title[:77] + "..."
 
-        return {
+        result: dict[str, Any] = {
             "order_id": order_slug,
             "client_name": client_name,
             "title": clean_title,
@@ -132,16 +174,23 @@ class IntakeParserService:
             "deadline_days": 2,
             "raw_text": text,
         }
+        questions = generate_clarifying_questions(result, text)
+        result["clarifying_questions"] = questions
+        result["clarifying_questions_text"] = format_clarifying_questions_text(questions)
+        return result
 
     def parse_raw_kwork_text_llm(
         self,
         raw_text: str,
         api_key: str,
-        model: str = "google/gemini-2.5-flash",
+        model: str = "",
     ) -> dict[str, Any]:
         fallback_data = self.parse_raw_kwork_text_regex(raw_text)
         if not api_key or not api_key.strip():
             return fallback_data
+
+        cfg = load_config()
+        routed_model = model.strip() or select_model_for_task("intake", cfg)
 
         system_instruction = (
             "Ты — 1С-архитектор. Проанализируй сообщение заказчика с Kwork и верни JSON со следующими полями:\n"
@@ -157,7 +206,7 @@ class IntakeParserService:
         )
 
         request_body = {
-            "model": model,
+            "model": routed_model,
             "messages": [
                 {"role": "system", "content": system_instruction},
                 {"role": "user", "content": raw_text},
@@ -166,25 +215,22 @@ class IntakeParserService:
             "temperature": 0.1,
         }
 
-        req = urllib.request.Request(
-            "https://openrouter.ai/api/v1/chat/completions",
-            data=json.dumps(request_body).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {api_key.strip()}",
-                "Content-Type": "application/json",
-                "User-Agent": "kwork-cockpit",
-            },
-            method="POST",
-        )
-
         try:
-            with urllib.request.urlopen(req, timeout=10.0) as resp:
-                resp_json = json.loads(resp.read().decode("utf-8"))
-                content = resp_json["choices"][0]["message"]["content"]
-                parsed_llm = json.loads(content)
-                merged = {**fallback_data, **parsed_llm}
-                merged["raw_text"] = raw_text
-                return merged
+            resp_json, _ = self.dual_client.chat_completion_sync(
+                payload=request_body,
+                task_type="intake",
+                order_id=str(fallback_data.get("order_id", "default")),
+                api_key_override=api_key,
+                timeout=10.0,
+            )
+            content = resp_json["choices"][0]["message"]["content"]
+            parsed_llm = json.loads(content)
+            merged = {**fallback_data, **parsed_llm}
+            merged["raw_text"] = raw_text
+            questions = generate_clarifying_questions(merged, raw_text)
+            merged["clarifying_questions"] = questions
+            merged["clarifying_questions_text"] = format_clarifying_questions_text(questions)
+            return merged
         except Exception as exc:
             logger.warning("LLM parse fallback to regex due to error: %s", exc)
             return fallback_data

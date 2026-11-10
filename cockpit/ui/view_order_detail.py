@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-import json
 import logging
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 import customtkinter
-from guard.bsl_linter import lint_bsl_code
+
+from guard.bsl_linter import format_diagnostics_for_llm, lint_bsl_code
+from guard.config import load_config
+from guard.library import save_snippet
 
 LOGGER = logging.getLogger("cockpit.view_order_detail")
 if not LOGGER.handlers:
@@ -17,7 +19,7 @@ if not LOGGER.handlers:
     LOGGER.addHandler(_handler)
     LOGGER.setLevel(logging.INFO)
 
-STAGE_OPTIONS: list[str] = ["intake", "development", "testing", "delivered", "warranty", "archive"]
+STAGE_OPTIONS: list[str] = ["lead", "in_progress", "review", "delivered", "warranty", "cancelled"]
 
 DEFAULT_CHECKLIST: dict[str, bool] = {
     "bsl_lint_clean": False,
@@ -67,6 +69,16 @@ class ViewOrderDetail(customtkinter.CTkFrame):
         )
         self.order_heading.grid(row=0, column=1, sticky="w", padx=6, pady=12)
 
+        self.start_work_btn = customtkinter.CTkButton(
+            self.header_frame,
+            text="🚀 В работу (1-Click Start)",
+            fg_color="#059669",
+            hover_color="#047857",
+            font=customtkinter.CTkFont(weight="bold"),
+            command=self.on_start_work_1click,
+        )
+        self.start_work_btn.grid(row=0, column=2, padx=(6, 16), pady=12)
+
         self.tabview = customtkinter.CTkTabview(self)
         self.tabview.grid(row=1, column=0, sticky="nsew", padx=20, pady=10)
 
@@ -104,6 +116,36 @@ class ViewOrderDetail(customtkinter.CTkFrame):
         except Exception as error:
             LOGGER.error("Failed to load order %s: %s", order_id, error, exc_info=True)
             self.controller.show_notification("Ошибка загрузки", str(error), error=True)
+
+    def on_start_work_1click(self) -> None:
+        if not self.current_order_id:
+            return
+        target_id = self.current_order_id
+
+        def worker() -> dict[str, Any]:
+            res = self.controller.orders_facade.start_order_work(target_id)
+            if res.get("ok"):
+                order_dir = Path(res["order_dir"])
+                self.controller.onec_runner.open_in_vscode(order_dir)
+            return res
+
+        def done(res: dict[str, Any]) -> None:
+            if not res.get("ok"):
+                self.controller.show_notification("Ошибка старта", str(res.get("error", "Не удалось запустить")), error=True)
+                return
+            prompt = str(res.get("prompt") or "")
+            if prompt:
+                self.clipboard_clear()
+                self.clipboard_append(prompt)
+            self.stage_menu.set("in_progress")
+            self.controller.show_notification(
+                "Заказ взят в работу",
+                f"Шаблон: {res.get('template')} (файлов: {res.get('copied_files')})\n"
+                f"Профиль MCP: {res.get('mcp_profile')}\n"
+                f"Промпт скопирован в буфер, папка открыта в IDE.",
+            )
+
+        self.controller.run_in_background(worker, on_done=done)
 
     def _build_tab_overview(self) -> None:
         self.tab_overview.grid_columnconfigure((0, 1), weight=1)
@@ -255,7 +297,7 @@ class ViewOrderDetail(customtkinter.CTkFrame):
 
         btn_prompt = customtkinter.CTkButton(
             actions_bar,
-            text="📋 Скопировать Roo-промпт",
+            text="📋 Скопировать промпт",
             fg_color="#0D9488",
             hover_color="#0F766E",
             command=self.on_dev_copy_prompt,
@@ -273,12 +315,12 @@ class ViewOrderDetail(customtkinter.CTkFrame):
 
         linter_lbl = customtkinter.CTkLabel(
             self.tab_dev,
-            text="Синтаксический контроль BSL (вставьте код или метод для проверки):",
+            text="Синтаксический контроль BSL / сохранение сниппета в Library:",
             font=customtkinter.CTkFont(size=13, weight="bold"),
         )
-        linter_lbl.grid(row=1, column=0, sticky="w", padx=10, pady=(12, 4))
+        linter_lbl.grid(row=1, column=0, sticky="w", padx=10, pady=(10, 4))
 
-        self.bsl_editor = customtkinter.CTkTextbox(self.tab_dev, height=180, font=customtkinter.CTkFont(family="Consolas", size=12))
+        self.bsl_editor = customtkinter.CTkTextbox(self.tab_dev, height=165, font=customtkinter.CTkFont(family="Consolas", size=12))
         self.bsl_editor.grid(row=2, column=0, sticky="ew", padx=10, pady=4)
 
         linter_actions = customtkinter.CTkFrame(self.tab_dev, fg_color="transparent")
@@ -289,7 +331,30 @@ class ViewOrderDetail(customtkinter.CTkFrame):
             text="🔍 Проверить BSL-код",
             command=self.on_dev_run_linter,
         )
-        btn_lint.pack(side="left")
+        btn_lint.pack(side="left", padx=(0, 8))
+
+        self.snippet_id_entry = customtkinter.CTkEntry(
+            linter_actions,
+            placeholder_text="ID сниппета (напр. custom_calc)",
+            width=190,
+        )
+        self.snippet_id_entry.pack(side="left", padx=4)
+
+        self.snippet_type_menu = customtkinter.CTkOptionMenu(
+            linter_actions,
+            values=["bsl", "query"],
+            width=85,
+        )
+        self.snippet_type_menu.pack(side="left", padx=4)
+
+        self.btn_save_snippet = customtkinter.CTkButton(
+            linter_actions,
+            text="💾 Сохранить сниппет в Library",
+            fg_color="#0D9488",
+            hover_color="#0F766E",
+            command=self.on_save_snippet_to_library,
+        )
+        self.btn_save_snippet.pack(side="left", padx=4)
 
         self.linter_results = customtkinter.CTkTextbox(self.tab_dev, height=120, state="disabled")
         self.linter_results.grid(row=4, column=0, sticky="ew", padx=10, pady=6)
@@ -297,13 +362,17 @@ class ViewOrderDetail(customtkinter.CTkFrame):
     def on_dev_open_vscode(self) -> None:
         if not self.current_detail:
             return
-        try:
-            ok, msg = self.controller.onec_runner.open_in_vscode(self.current_detail.order_dir)
+        target_dir = self.current_detail.order_dir
+
+        def worker() -> tuple[bool, str]:
+            return self.controller.onec_runner.open_in_vscode(target_dir)
+
+        def done(res: tuple[bool, str]) -> None:
+            ok, msg = res
             if not ok:
                 self.controller.show_notification("VS Code", msg, error=True)
-        except Exception as error:
-            LOGGER.error("Dev open VS Code error: %s", error, exc_info=True)
-            self.controller.show_notification("Ошибка", str(error), error=True)
+
+        self.controller.run_in_background(worker, on_done=done)
 
     def on_dev_copy_prompt(self) -> None:
         if not self.current_detail:
@@ -320,35 +389,57 @@ class ViewOrderDetail(customtkinter.CTkFrame):
     def on_dev_launch_1c(self) -> None:
         if not self.current_detail:
             return
-        try:
-            candidates = list(self.current_detail.order_dir.glob("*.epf")) + list(self.current_detail.order_dir.glob("*.erf"))
-            if not candidates:
-                self.controller.show_notification(
-                    "1С Тонкий клиент",
-                    "В каталоге заказа еще нет .epf или .erf файлов",
-                    error=True,
-                )
-                return
-            target_file = candidates[0]
-            ok, msg = self.controller.onec_runner.launch_epf_in_thin_client(target_file)
+        order_dir = self.current_detail.order_dir
+        candidates = list(order_dir.glob("*.epf")) + list(order_dir.glob("*.erf")) + list(order_dir.glob("delivery/*.epf")) + list(order_dir.glob("delivery/*.erf"))
+        if not candidates:
+            self.controller.show_notification(
+                "1С Тонкий клиент",
+                "В каталоге заказа еще нет .epf или .erf файлов",
+                error=True,
+            )
+            return
+        target_file = candidates[0]
+        ib_path = str(load_config().get("onec", {}).get("test_ib_path") or "")
+
+        def worker() -> tuple[bool, str]:
+            return self.controller.onec_runner.launch_epf_in_thin_client(ib_path, target_file)
+
+        def done(res: tuple[bool, str]) -> None:
+            ok, msg = res
             self.controller.show_notification("Запуск 1С", msg, error=not ok)
-        except Exception as error:
-            LOGGER.error("Launch 1C error: %s", error, exc_info=True)
-            self.controller.show_notification("Ошибка запуска 1С", str(error), error=True)
+
+        self.controller.run_in_background(worker, on_done=done)
+
+    def on_save_snippet_to_library(self) -> None:
+        code = self.bsl_editor.get("1.0", "end").strip()
+        if not code:
+            self.controller.show_notification("Library", "Введите код сниппета в редактор", error=True)
+            return
+        raw_id = self.snippet_id_entry.get().strip() or (f"{self.current_order_id}_snippet" if self.current_order_id else "custom_snippet")
+        stype = self.snippet_type_menu.get()
+        title = f"{raw_id} (из {self.current_order_id or 'Cockpit'})"
+        lib_dir = self.controller.base_dir / "library"
+        ok, msg = save_snippet(
+            snippet_id=raw_id,
+            title=title,
+            code=code,
+            snippet_type=stype,
+            tags=[stype, self.current_detail.kind if self.current_detail else "custom"],
+            library_dir=lib_dir,
+        )
+        self.controller.show_notification("Library", msg, error=not ok)
 
     def on_dev_run_linter(self) -> None:
         code = self.bsl_editor.get("1.0", "end")
         try:
             issues = lint_bsl_code(code)
+            formatted = format_diagnostics_for_llm(issues, include_warnings=True)
             self.linter_results.configure(state="normal")
             self.linter_results.delete("1.0", "end")
-            if not issues:
+            if not formatted:
                 self.linter_results.insert("1.0", "✅ Ошибок не обнаружено. Код BSL корректен.")
             else:
-                lines = [f"Найдено замечаний: {len(issues)}"]
-                for issue in issues:
-                    lines.append(f"• [{issue.severity}] {issue.code} (строка {issue.line}): {issue.message}")
-                self.linter_results.insert("1.0", "\n".join(lines))
+                self.linter_results.insert("1.0", formatted)
             self.linter_results.configure(state="disabled")
         except Exception as error:
             LOGGER.error("Lint BSL error: %s", error, exc_info=True)
@@ -426,19 +517,22 @@ class ViewOrderDetail(customtkinter.CTkFrame):
 
         stats_card = customtkinter.CTkFrame(self.tab_budget, fg_color="#1E293B", corner_radius=8)
         stats_card.grid(row=0, column=0, sticky="ew", padx=10, pady=8)
-        stats_card.grid_columnconfigure((0, 1, 2, 3), weight=1)
+        stats_card.grid_columnconfigure((0, 1, 2, 3, 4), weight=1)
 
-        self.b_calls_lbl = customtkinter.CTkLabel(stats_card, text="Вызовы MCP\n0 / 25", font=customtkinter.CTkFont(size=14, weight="bold"))
-        self.b_calls_lbl.grid(row=0, column=0, padx=10, pady=10)
+        self.b_calls_lbl = customtkinter.CTkLabel(stats_card, text="Вызовы MCP\n0 / 25", font=customtkinter.CTkFont(size=13, weight="bold"))
+        self.b_calls_lbl.grid(row=0, column=0, padx=8, pady=10)
 
-        self.b_status_lbl = customtkinter.CTkLabel(stats_card, text="Лимит\nВ норме", font=customtkinter.CTkFont(size=14, weight="bold"), text_color="#10B981")
-        self.b_status_lbl.grid(row=0, column=1, padx=10, pady=10)
+        self.b_status_lbl = customtkinter.CTkLabel(stats_card, text="Лимит\nВ норме", font=customtkinter.CTkFont(size=13, weight="bold"), text_color="#10B981")
+        self.b_status_lbl.grid(row=0, column=1, padx=8, pady=10)
 
-        self.b_tokens_lbl = customtkinter.CTkLabel(stats_card, text="Токены LLM\n0", font=customtkinter.CTkFont(size=14, weight="bold"))
-        self.b_tokens_lbl.grid(row=0, column=2, padx=10, pady=10)
+        self.b_tokens_lbl = customtkinter.CTkLabel(stats_card, text="Токены LLM\n0", font=customtkinter.CTkFont(size=13, weight="bold"))
+        self.b_tokens_lbl.grid(row=0, column=2, padx=8, pady=10)
 
-        self.b_cost_lbl = customtkinter.CTkLabel(stats_card, text="Затраты AI\n0.00 ₽", font=customtkinter.CTkFont(size=14, weight="bold"), text_color="#38BDF8")
-        self.b_cost_lbl.grid(row=0, column=3, padx=10, pady=10)
+        self.b_cost_lbl = customtkinter.CTkLabel(stats_card, text="Затраты AI\n0.00 ₽", font=customtkinter.CTkFont(size=13, weight="bold"), text_color="#38BDF8")
+        self.b_cost_lbl.grid(row=0, column=3, padx=8, pady=10)
+
+        self.b_margin_lbl = customtkinter.CTkLabel(stats_card, text="Чистая маржа\n0 ₽", font=customtkinter.CTkFont(size=13, weight="bold"), text_color="#10B981")
+        self.b_margin_lbl.grid(row=0, column=4, padx=8, pady=10)
 
         actions_bar = customtkinter.CTkFrame(self.tab_budget, fg_color="transparent")
         actions_bar.grid(row=1, column=0, sticky="ew", padx=10, pady=6)
@@ -461,6 +555,14 @@ class ViewOrderDetail(customtkinter.CTkFrame):
         )
         btn_reset.pack(side="left", padx=4)
 
+        self.b_economy_lbl = customtkinter.CTkLabel(
+            actions_bar,
+            text="",
+            font=customtkinter.CTkFont(size=12, weight="bold"),
+            text_color="#F59E0B",
+        )
+        self.b_economy_lbl.pack(side="right", padx=8)
+
         lbl_log = customtkinter.CTkLabel(self.tab_budget, text="События MCP-вызовов по заказу:", font=customtkinter.CTkFont(weight="bold"))
         lbl_log.grid(row=2, column=0, sticky="w", padx=10, pady=(10, 4))
 
@@ -479,7 +581,17 @@ class ViewOrderDetail(customtkinter.CTkFrame):
                 self.b_status_lbl.configure(text="Лимит\nВ норме", text_color="#10B981")
 
             self.b_tokens_lbl.configure(text=f"Токены LLM\n{budget.total_tokens:,}".replace(",", " "))
-            self.b_cost_lbl.configure(text=f"Затраты AI\n{budget.real_cost_rub:.2f} ₽")
+            if budget.virtual_cost_rub > 0 and budget.real_cost_rub == 0:
+                cost_str = f"Затраты AI\n0.00 ₽ (подписка ~{budget.virtual_cost_rub:.1f} ₽)"
+            else:
+                cost_str = f"Затраты AI\n{budget.real_cost_rub:.2f} ₽"
+            self.b_cost_lbl.configure(text=cost_str)
+            self.b_margin_lbl.configure(text=f"Чистая маржа\n{budget.net_margin_rub:,.0f} ₽".replace(",", " "))
+
+            if budget.economy_mode or budget.is_api_over_threshold:
+                self.b_economy_lbl.configure(text="⚠ Эконом-режим (>5% бюджета на API)")
+            else:
+                self.b_economy_lbl.configure(text="")
 
             events = self.controller.orders_facade.get_order_mcp_events(detail.order_id)
             self.mcp_log_box.configure(state="normal")
@@ -503,7 +615,7 @@ class ViewOrderDetail(customtkinter.CTkFrame):
         if not self.current_order_id:
             return
         try:
-            ok, msg = self.controller.orders_facade.extend_budget(self.current_order_id, 10)
+            _, msg = self.controller.orders_facade.extend_budget(self.current_order_id, 10)
             self._fill_tab_budget(self.current_detail)
             self.controller.show_notification("Бюджет расширен", msg)
         except Exception as error:
@@ -514,7 +626,7 @@ class ViewOrderDetail(customtkinter.CTkFrame):
         if not self.current_order_id:
             return
         try:
-            ok, msg = self.controller.orders_facade.reset_budget(self.current_order_id)
+            _, msg = self.controller.orders_facade.reset_budget(self.current_order_id)
             self._fill_tab_budget(self.current_detail)
             self.controller.show_notification("Бюджет сброшен", msg)
         except Exception as error:
@@ -548,7 +660,7 @@ class ViewOrderDetail(customtkinter.CTkFrame):
 
         self.btn_deliver_zip = customtkinter.CTkButton(
             deliver_action_frame,
-            text="📦 Собрать ZIP для Kwork и сдать заказ",
+            text="📦 Собрать поставку (Verify + ZIP + Kwork)",
             height=42,
             fg_color="#059669",
             hover_color="#047857",
@@ -574,25 +686,38 @@ class ViewOrderDetail(customtkinter.CTkFrame):
     def on_deliver_order(self) -> None:
         if not self.current_detail:
             return
-        try:
-            errs = self.controller.packager.render_delivery_templates(self.current_detail.order_dir)
-            if errs:
-                self.controller.show_notification(
-                    "Предупреждение по шаблонам",
-                    "\n".join(errs),
-                    error=True,
-                )
-            zip_file = self.controller.packager.build_delivery_zip(self.current_detail.order_dir)
-            self.controller.orders_facade.advance_stage(self.current_detail.order_id, "delivered")
-            self.stage_menu.set("delivered")
-            self.controller.packager.reveal_in_explorer(zip_file)
-            self.controller.show_notification(
-                "Заказ сдан!",
-                f"Архив собран:\n{zip_file}",
+        order_dir = self.current_detail.order_dir
+        order_id = self.current_detail.order_id
+
+        def worker() -> dict[str, Any]:
+            res = self.controller.packager.compile_and_package_order(
+                order_dir,
+                onec_runner=self.controller.onec_runner,
             )
-        except Exception as error:
-            LOGGER.error("Deliver order error: %s", error, exc_info=True)
+            self.controller.orders_facade.advance_stage(order_id, "delivered")
+            self.controller.packager.reveal_in_explorer(res["zip_path"])
+            return res
+
+        def done(res: dict[str, Any]) -> None:
+            self.stage_menu.set("delivered")
+            kwork_msg = str(res.get("kwork_message") or "")
+            if kwork_msg:
+                self.clipboard_clear()
+                self.clipboard_append(kwork_msg)
+            zip_file = res.get("zip_path")
+            tpl_errs = res.get("template_errors") or []
+            if tpl_errs:
+                self.controller.show_notification("Предупреждение по шаблонам", "\n".join(tpl_errs), error=True)
+            else:
+                self.controller.show_notification(
+                    "Заказ сдан!",
+                    f"Архив собран: {zip_file}\nСообщение для Kwork скопировано в буфер.",
+                )
+
+        def on_err(error: Exception) -> None:
             self.controller.show_notification("Ошибка сдачи заказа", str(error), error=True)
+
+        self.controller.run_in_background(worker, on_done=done, on_error=on_err)
 
     def _build_tab_warranty(self) -> None:
         self.tab_warranty.grid_columnconfigure(0, weight=1)

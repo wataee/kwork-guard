@@ -11,19 +11,24 @@ import subprocess
 import sys
 from typing import Any, Optional
 
+from guard.bsl_linter import filter_critical_issues, lint_bsl_code
+
 ROOT_DIR = Path(__file__).resolve().parent.parent
 LOGS_DIR = ROOT_DIR / "logs"
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 logger = logging.getLogger("kwork-guard.bsl-ls")
-log_handler = RotatingFileHandler(
-    LOGS_DIR / "cockpit.log",
-    maxBytes=5 * 1024 * 1024,
-    backupCount=3,
-    encoding="utf-8",
-)
-logger.addHandler(log_handler)
-logger.setLevel(logging.INFO)
+if not logger.handlers:
+    log_handler = RotatingFileHandler(
+        LOGS_DIR / "cockpit.log",
+        maxBytes=5 * 1024 * 1024,
+        backupCount=3,
+        encoding="utf-8",
+    )
+    logger.addHandler(log_handler)
+    logger.setLevel(logging.INFO)
+
+IGNORED_SEVERITIES = {"INFO", "INFORMATION", "HINT"}
 
 
 @dataclass
@@ -32,6 +37,7 @@ class BslLsDiagnostic:
     line: int
     severity: str
     message: str
+    col: int = 1
 
 
 class BslLanguageServerService:
@@ -110,6 +116,25 @@ class BslLanguageServerService:
             }
         }
 
+    def run_fast_diagnostics(
+        self,
+        code: str,
+        profile: str = "common",
+        is_object_module: bool = False,
+    ) -> list[BslLsDiagnostic]:
+        raw_issues = lint_bsl_code(code, profile=profile, is_object_module=is_object_module)
+        filtered = filter_critical_issues(raw_issues, include_warnings=True)
+        return [
+            BslLsDiagnostic(
+                code=item.code,
+                line=item.line,
+                severity=item.severity.upper(),
+                message=item.message,
+                col=item.col,
+            )
+            for item in filtered
+        ]
+
     def run_diagnostics_on_file(self, file_path: Path) -> list[BslLsDiagnostic]:
         status = self.get_status()
         if not status["available"]:
@@ -142,12 +167,16 @@ class BslLanguageServerService:
                     data = json.loads(res.stdout)
                     items = data if isinstance(data, list) else data.get("issues", [])
                     for item in items:
+                        sev = str(item.get("severity", "WARNING")).upper()
+                        if sev in IGNORED_SEVERITIES:
+                            continue
                         diagnostics.append(
                             BslLsDiagnostic(
                                 code=item.get("code", "BSLLS_UNKNOWN"),
                                 line=int(item.get("line", 1)),
-                                severity=item.get("severity", "WARNING").upper(),
+                                severity=sev,
                                 message=item.get("message", "Диагностика BSL Language Server"),
+                                col=int(item.get("col", item.get("column", 1))),
                             )
                         )
                 except Exception as json_err:
@@ -157,3 +186,32 @@ class BslLanguageServerService:
         except Exception as exc:
             logger.error("Exception during BSL LS execution: %s", exc)
             return []
+
+    def run_hybrid_diagnostics(
+        self,
+        target: Path | str,
+        final_validation: bool = False,
+        profile: str = "common",
+        is_object_module: bool = False,
+    ) -> list[BslLsDiagnostic]:
+        if isinstance(target, Path):
+            code = target.read_text(encoding="utf-8-sig") if target.is_file() else ""
+            fast_results = self.run_fast_diagnostics(code, profile=profile, is_object_module=is_object_module)
+            if not final_validation:
+                return fast_results
+            ls_results = self.run_diagnostics_on_file(target)
+            return fast_results + ls_results if ls_results else fast_results
+
+        return self.run_fast_diagnostics(str(target), profile=profile, is_object_module=is_object_module)
+
+    @staticmethod
+    def format_for_llm(diagnostics: list[BslLsDiagnostic], include_warnings: bool = True) -> str:
+        lines: list[str] = []
+        for diag in diagnostics:
+            sev = diag.severity.upper()
+            if sev in IGNORED_SEVERITIES:
+                continue
+            if not include_warnings and sev == "WARNING":
+                continue
+            lines.append(f"{diag.line}:{diag.col} [{diag.code}] {diag.message}")
+        return "\n".join(lines)

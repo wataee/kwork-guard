@@ -14,6 +14,7 @@ class LintIssue:
     line: int
     message: str
     severity: str
+    col: int = 1
 
 
 BLOCK_PAIRS = {
@@ -72,6 +73,7 @@ def lint_bsl_code(
     profile: str = "common",
     is_object_module: bool = False,
 ) -> list[LintIssue]:
+    code = code.lstrip("\ufeff")
     issues: list[LintIssue] = []
     raw_lines = code.splitlines()
 
@@ -323,3 +325,24 @@ def lint_bsl_code(
             )
 
     return issues
+
+
+def filter_critical_issues(
+    issues: list[LintIssue],
+    include_warnings: bool = True,
+) -> list[LintIssue]:
+    allowed = {"ERROR", "CRITICAL"}
+    if include_warnings:
+        allowed.add("WARNING")
+    return [item for item in issues if item.severity.upper() in allowed]
+
+
+def format_diagnostics_for_llm(
+    issues: list[LintIssue],
+    include_warnings: bool = True,
+) -> str:
+    relevant = filter_critical_issues(issues, include_warnings=include_warnings)
+    if not relevant:
+        return ""
+    lines = [f"{item.line}:{item.col} [{item.code}] {item.message}" for item in relevant]
+    return "\n".join(lines)

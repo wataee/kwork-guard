@@ -387,7 +387,7 @@ def test_system_doctor_all_checks(tmp_path: Path):
     (tmp_path / "requirements.txt").write_text("pytest>=7.0.0\n", encoding="utf-8")
 
     checks = doctor.run_full_diagnostics()
-    assert len(checks) == 11
+    assert len(checks) == 12
     check_names = [c["check"] for c in checks]
     assert "Версия Python" in check_names
     assert "Python-зависимости" in check_names
@@ -395,3 +395,4 @@ def test_system_doctor_all_checks(tmp_path: Path):
     assert "Каталог заказов" in check_names
     assert "Файл конфигурации config.json" in check_names
     assert "BSL Language Server (LSP/MCP)" in check_names
+    assert "Antigravity Gateway (LLM Dual-Backend)" in check_names

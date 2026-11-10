@@ -22,6 +22,11 @@ if sys.platform == "win32":
         logger.warning("Stream reconfigure failed: %s", stream_exc)
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from guard.fs_utils import atomic_write_json
+
 CONFIG_PATH = ROOT_DIR / "config.json"
 TEMPLATES_DIR = ROOT_DIR / "templates"
 MCP_CONFIGS_DIR = ROOT_DIR / "mcp_configs"
@@ -76,7 +81,8 @@ def repair_order_mcp_config(
         cfg = build_mcp_config(mcp_profile, order_id, guard_host, guard_port)
         roo_dir = order_dir / ".roo"
         roo_dir.mkdir(parents=True, exist_ok=True)
-        (roo_dir / "mcp.json").write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+        atomic_write_json(roo_dir / "mcp.json", cfg)
+        atomic_write_json(order_dir / ".mcp.json", cfg)
         return True
     except Exception as exc:
         logger.warning("Failed to repair MCP config for %s: %s", order_dir, exc)
@@ -115,15 +121,23 @@ def load_order_json(order_dir: Path) -> Optional[dict[str, Any]]:
 
 def save_order_json(order_dir: Path, data: dict[str, Any]) -> None:
     p = order_dir / "order.json"
-    with p.open("w", encoding="utf-8") as file_handle:
-        json.dump(data, file_handle, ensure_ascii=False, indent=2)
+    atomic_write_json(p, data)
 
 
-def get_token_stats(order_id: str) -> dict[str, Any]:
-    state_file = STATE_DIR / f"{order_id}.json"
+def get_token_stats(order_id: str, state_dir: Optional[Path] = None) -> dict[str, Any]:
+    target_state_dir = state_dir if state_dir else STATE_DIR
+    state_file = target_state_dir / f"{order_id}.json"
     calls = 0
     chars = 0
     errors = 0
+    in_tokens = 0
+    out_tokens = 0
+    real_usd = 0.0
+    real_rub = 0.0
+    virtual_usd = 0.0
+    virtual_rub = 0.0
+    economy_mode = False
+
     if state_file.is_file():
         try:
             with state_file.open("r", encoding="utf-8") as file_handle:
@@ -131,12 +145,24 @@ def get_token_stats(order_id: str) -> dict[str, Any]:
                 calls = sd.get("calls_count", 0)
                 chars = sd.get("total_response_chars", 0)
                 errors = sd.get("errors_count", 0)
+                in_tokens = int(sd.get("input_tokens", 0))
+                out_tokens = int(sd.get("output_tokens", 0))
+                real_usd = float(sd.get("real_cost_usd", 0.0))
+                real_rub = float(sd.get("real_cost_rub", 0.0))
+                virtual_usd = float(sd.get("virtual_cost_usd", 0.0))
+                virtual_rub = float(sd.get("virtual_cost_rub", 0.0))
+                economy_mode = bool(sd.get("economy_mode", False))
         except Exception as exc:
             logger.warning("Token stats read error for %s: %s", order_id, exc)
 
-    tokens = int(chars / 3.5)
-    cost_usd = (tokens / 1_000_000) * 3.00
-    cost_rub = cost_usd * 95.0
+    tokens = (in_tokens + out_tokens) if (in_tokens + out_tokens) > 0 else int(chars / 3.5)
+    has_llm_billing = (virtual_usd > 0.0) or (real_usd > 0.0) or (in_tokens + out_tokens > 0)
+    if has_llm_billing:
+        cost_usd = real_usd
+        cost_rub = real_rub
+    else:
+        cost_usd = (tokens / 1_000_000) * 3.00
+        cost_rub = cost_usd * 95.0
 
     return {
         "calls": calls,
@@ -145,6 +171,9 @@ def get_token_stats(order_id: str) -> dict[str, Any]:
         "tokens": tokens,
         "cost_usd": round(cost_usd, 4),
         "cost_rub": round(cost_rub, 2),
+        "virtual_cost_usd": round(virtual_usd, 4),
+        "virtual_cost_rub": round(virtual_rub, 2),
+        "economy_mode": economy_mode,
     }
 
 

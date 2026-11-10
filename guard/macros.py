@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from guard.bsl_linter import lint_bsl_code
+from guard.bsl_linter import format_diagnostics_for_llm, lint_bsl_code
+from guard.fs_utils import write_bsl_with_bom
 from guard.compact_schema import compact_metadata_schema, format_schema_summary
 from guard.platform_context import PlatformContextService
 
@@ -62,12 +63,17 @@ def macro_bootstrap_gold(a: dict) -> dict:
 
     target_dir.mkdir(parents=True, exist_ok=True)
 
-    old_name = "ШаблонВПФ" if "vpf" in tpl_name else "ШаблонОтчета"
+    if "vpf" in tpl_name:
+        old_name = "ШаблонВПФ"
+    elif "ext" in tpl_name:
+        old_name = "ШаблонРасширения"
+    else:
+        old_name = "ШаблонОтчета"
 
     copied_files = 0
     for item in src_dir.rglob("*"):
         rel = item.relative_to(src_dir)
-        parts = [p.replace(old_name, new_name) for p in rel.parts]
+        parts = [part.replace(old_name, new_name) for part in rel.parts]
         dst_path = target_dir.joinpath(*parts)
 
         if item.is_dir():
@@ -75,9 +81,12 @@ def macro_bootstrap_gold(a: dict) -> dict:
         else:
             dst_path.parent.mkdir(parents=True, exist_ok=True)
             try:
-                text = item.read_text(encoding="utf-8")
-                text = text.replace(old_name, new_name)
-                dst_path.write_text(text, encoding="utf-8")
+                text_val = item.read_text(encoding="utf-8-sig")
+                text_val = text_val.replace(old_name, new_name)
+                if dst_path.suffix.lower() == ".bsl":
+                    write_bsl_with_bom(dst_path, text_val)
+                else:
+                    dst_path.write_text(text_val, encoding="utf-8")
             except UnicodeDecodeError:
                 shutil.copy2(item, dst_path)
             copied_files += 1
@@ -563,12 +572,10 @@ def macro_bsl_lint_module(a: dict) -> dict:
     profile = a.get("profile", "common")
     is_obj = bool(a.get("is_object_module", False))
     issues = lint_bsl_code(code, profile=profile, is_object_module=is_obj)
-    if not issues:
+    formatted = format_diagnostics_for_llm(issues, include_warnings=True)
+    if not formatted:
         return tool_result("Статический анализ BSL пройден: 0 ошибок и замечаний.")
-    lines = [f"Обнаружено {len(issues)} замечаний BSL:"]
-    for iss in issues:
-        lines.append(f"- [{iss.severity}] Строка {iss.line} ({iss.code}): {iss.message}")
-    return tool_result("\n".join(lines), is_error=any(i.severity == "ERROR" for i in issues))
+    return tool_result(formatted, is_error=any(i.severity == "ERROR" for i in issues))
 
 
 def macro_get_ai_rules(a: dict) -> dict:

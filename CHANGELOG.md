@@ -1,5 +1,34 @@
 # История изменений (CHANGELOG)
 
+## [2.1.0] - 2026-11-10
+
+### Добавлено и модернизировано (Antigravity + OpenRouter Dual-Backend & 1C EDT MCP)
+
+#### Dual-Backend Архитектура и Биллинг
+- **`config.json` и `guard/config.py`:** добавлены `active_provider` (`antigravity` | `openrouter`), конфигурации `providers`, роутинг моделей `model_routing` (`fast_tasks` -> `gemini-2.5-flash`, `coding_tasks` -> `claude-3-7-sonnet`, `economy_mode_model`) и финансовые пороги (`finance`).
+- **`guard/dual_backend.py`:** реализован `DualBackendClient` с горячим переключением провайдеров, нормализацией `tool_calls`/`tool_results`/`thinking` под `1C EDT MCP`, очисткой пустых полей JSON Schema и автоматическим фоллбэком с `antigravity` (:3000/:3001) при `429`/5xx/недоступности на `openrouter`.
+- **`edt_guard.py`:** инициализирован ротируемый `LOGGER` (`logs/guard_stdout.log`), добавлены маршруты `GET/POST /admin/provider` и `POST /v1/chat/completions`, нормализация аргументов при `antigravity` и компактный вывод ошибок линтера.
+- **`guard/openrouter_billing.py`:** добавлен режим `virtual_cost` для провайдера `antigravity` (подсчет входящих/исходящих токенов и виртуальной экономии при реальном расходе `$0.00`).
+
+#### Экстремальная оптимизация расхода токенов и надежность
+- **Защита Prompt Caching:** статический `system`-промпт размечается `cache_control: {"type": "ephemeral"}`, а динамический контекст из `library.py` и `platform_context.py` инжектируется строго в последнее сообщение `user`/`tool`.
+- **Сжатие 1C XML (`guard/compact_schema.py`):** добавлены `compact_form_xml`, `compact_dcs_xml` (СКД / `settingsvariant`), `compact_mdo_xml` и универсальный `compact_1c_xml` с вырезанием визуального шума (шрифты, цвета, координаты, условное оформление), интегрированный в `guard/compactor.py`.
+- **Очистка истории и компактный линтер:** `prune_verified_bsl_history` сворачивает старые версии подтвержденных `.bsl`-модулей; `format_diagnostics_for_llm` / `format_for_llm` оставляют только `ERROR`/`CRITICAL`/`WARNING` в однострочном формате `Line:Col [RuleCode] Message`.
+- **Атомарная запись и UTF-8 BOM (`guard/fs_utils.py`):** добавлены `atomic_write_text`, `atomic_write_json` (через `tempfile` + `os.replace` с retry при блокировках Windows и `RLock`) и `write_bsl_with_bom` (`utf-8-sig`).
+- **Двухконтурная проверка BSL (`guard/bsl_ls_runner.py`, `tools/verify_zero_defect.py`):** быстрый Python-линтер на прокси-итерациях, тяжелый JVM `bsl-language-server` только при `final_validation=True` и флаг `--bsl`.
+
+#### Kwork Cockpit v2.1
+- **1-Click Start и шаблон расширений:** добавлен шаблон `gold_templates/ext_standard` (CFE), адаптация `.mcp.json`, `.roo/mcp.json`, `CLAUDE.md`, неблокирующий UI на базе `ThreadPoolExecutor` (`cockpit/app.py`).
+- **Провайдер и финансы:** переключатель `Antigravity` / `OpenRouter` и индикатор `AGY :3000` в `TopBar`, настройки API-ключа Antigravity в `view_settings.py`, расчет чистой маржи `Цена - 20% Kwork - API` и авто-включение `economy_mode` при превышении 5% бюджета заказа.
+- **Умный приём ТЗ и пакетная сдача:** генерация уточняющих вопросов при парсинге ТЗ (`intake_parser.py`, `view_new_order.py`), кнопка `Save Snippet to Library`, конвейер `compile_and_package_order` (проверка BOM и `verify_bsl_directory`, адаптация клиентской инструкции под `vpf`/`report`/`ext`, ZIP-упаковка и копирование `message_kwork.md` в буфер).
+- **Системный Доктор:** расширен до 12 проверок (добавлена проверка шлюза Antigravity).
+
+#### Верификация v2.1
+- `python tools/verify_zero_defect.py` и `--bsl`: **0 нарушений** (`ZERO comments, ZERO docstrings inside functions/classes, ZERO pass/TODO`).
+- `python -m pytest --cov=guard --cov=cockpit/services tests/`: **144 из 144 тестов пройдены (100%)**, суммарное покрытие **94%** (`>= 90%` по каждому модулю `guard/*` и `cockpit/services/*`).
+
+---
+
 ## [2.0.0] - 2026-11-09
 
 ### Добавлено (Kwork Cockpit & Guard 2.0 - Zero-Defect Edition)

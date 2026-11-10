@@ -86,6 +86,7 @@ def test_cockpit_app_lifecycle_and_views(tmp_path: Path) -> None:
 
         with patch.object(app.packager, "reveal_in_explorer"):
             order_view.on_deliver_order()
+            app.wait_for_background_tasks()
 
         today_view = app.views["today"]
         app.show_view("today")
@@ -104,6 +105,9 @@ def test_cockpit_app_lifecycle_and_views(tmp_path: Path) -> None:
         sample_raw = "Добрый день, нужен отчет СКД по продажам для 1С:УТ 11.5. Бюджет 5000 руб, клиент petrov."
         new_view.raw_text_box.insert("1.0", sample_raw)
         new_view.on_parse_intake()
+        assert "petrov" in new_view.slug_entry.get().lower()
+        assert len(new_view.questions_box.get("1.0", "end").strip()) > 10
+        new_view.on_copy_questions()
         new_view.on_submit_create(open_vscode=False)
 
         fin_view = app.views["finance"]
@@ -126,26 +130,33 @@ def test_cockpit_app_lifecycle_and_views(tmp_path: Path) -> None:
         app.show_view("settings")
         app.update_idletasks()
         sett_view.on_run_diagnostics()
+        app.wait_for_background_tasks()
         sett_view.on_save_settings()
 
         top = app.top_bar
         with patch.object(app.guard_runner, "is_edt_running", return_value=True), \
-             patch.object(app.guard_runner, "is_guard_running", return_value=True):
+             patch.object(app.guard_runner, "is_guard_running", return_value=True), \
+             patch.object(app.guard_runner, "check_antigravity_status", return_value=(True, "http://127.0.0.1:3000/v1")):
             top.refresh_status()
             assert "8765 ●" in top.edt_badge.cget("text")
             assert "8766 ●" in top.guard_badge.cget("text")
+            assert "3000 ●" in top.agy_badge.cget("text")
 
         with patch.object(app.guard_runner, "prepare_workplace", return_value=(True, "Окружение готово")):
             top.on_prepare_workplace()
+            app.wait_for_background_tasks()
 
         with patch.object(app.guard_runner, "start_guard_background", return_value=True):
             top.on_start_guard()
+            app.wait_for_background_tasks()
 
         with patch.object(app.guard_runner, "stop_guard", return_value=True):
             top.on_stop_guard()
+            app.wait_for_background_tasks()
 
         with patch.object(app.guard_runner, "restart_guard", return_value=True):
             top.on_restart_guard()
+            app.wait_for_background_tasks()
 
         app.show_notification("Инфо", "Тестовое сообщение")
 
@@ -188,11 +199,13 @@ def test_order_detail_view_negative_and_linter_issues(tmp_path: Path) -> None:
 
         with patch.object(app.onec_runner, "open_in_vscode", return_value=(True, "OK")):
             order_view.on_dev_open_vscode()
+            app.wait_for_background_tasks()
 
         with patch.object(app.onec_runner, "launch_epf_in_thin_client", return_value=(True, "OK")):
             fake_epf = order.order_dir / "test.epf"
             fake_epf.write_text("epf", encoding="utf-8")
             order_view.on_dev_launch_1c()
+            app.wait_for_background_tasks()
 
         order_view.load_order("absent_order_999")
 
@@ -225,6 +238,7 @@ def test_new_order_view_edge_cases(tmp_path: Path) -> None:
 
         with patch.object(app.onec_runner, "open_in_vscode", return_value=(True, "OK")):
             new_view.on_submit_create(open_vscode=True)
+            app.wait_for_background_tasks()
 
         created = app.orders_facade.list_orders()
         assert len(created) > 0
@@ -260,6 +274,7 @@ def test_tools_view_pytest_thread(tmp_path: Path) -> None:
             mock_proc.stderr = ""
             mock_run.return_value = mock_proc
             tools_view.on_run_pytest()
+            app.wait_for_background_tasks()
 
     finally:
         app.destroy()
