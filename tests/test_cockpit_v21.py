@@ -416,4 +416,12 @@ async def test_antigravity_mcp_config_sync_and_root_mcp_route(tmp_path: Path) ->
         assert "Mcp-Session-Id" in r_init.headers
         assert r_init.json()["result"]["serverInfo"]["name"] == "edt-guard/full"
 
+    from cockpit.services.orders_facade import ROOT_DIR as FACADE_ROOT_DIR
+    custom_orders = tmp_path / "CustomOrders"
+    custom_orders.mkdir()
+    with patch("cockpit.services.orders_facade.get_orders_dir", return_value=custom_orders):
+        prod_facade = OrdersFacade(base_dir=FACADE_ROOT_DIR)
+        assert prod_facade.orders_dir == custom_orders
+
+
 

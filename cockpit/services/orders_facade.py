@@ -222,10 +222,13 @@ class OrdersFacade:
     ) -> None:
         if base_dir and not root_dir:
             root_dir = base_dir
-        if base_dir and not orders_dir:
-            orders_dir = base_dir / "orders"
         self.root_dir = root_dir if root_dir else ROOT_DIR
-        self.orders_dir = orders_dir if orders_dir else get_orders_dir()
+        if orders_dir is not None:
+            self.orders_dir = orders_dir
+        elif base_dir and base_dir.resolve() != ROOT_DIR.resolve():
+            self.orders_dir = base_dir / "orders"
+        else:
+            self.orders_dir = get_orders_dir()
         self.state_dir = self.root_dir / "state"
         self.templates_dir = self.root_dir / "templates"
         self.gold_templates_dir = self.root_dir / "gold_templates"

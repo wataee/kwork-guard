@@ -128,7 +128,9 @@ class ViewOrders(customtkinter.CTkFrame):
         for order in self._all_orders:
             if stage_choice in stage_mapping:
                 target_stage = stage_mapping[stage_choice]
-                if target_stage == "in_progress" and order.stage not in {"intake", "development", "testing", "rework"}:
+                if target_stage == "in_progress" and order.stage not in {
+                    "lead", "in_progress", "review", "intake", "development", "testing", "rework"
+                }:
                     continue
                 if target_stage != "in_progress" and order.stage != target_stage:
                     continue
