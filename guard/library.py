@@ -1,4 +1,3 @@
-"""guard/library.py - Работа с библиотекой эталонных сниппетов (WP3)."""
 from __future__ import annotations
 
 import json
@@ -27,7 +26,6 @@ def list_snippets(tags: Optional[list[str]] = None, snippet_type: Optional[str] 
             s_tags = set(s.get("tags", []))
             if not any(t in s_tags for t in tags):
                 continue
-        # Отдаём только компактные метаданные без тела кода
         result.append({
             "id": s["id"],
             "title": s["title"],
@@ -40,9 +38,6 @@ def list_snippets(tags: Optional[list[str]] = None, snippet_type: Optional[str] 
 
 
 def get_snippet(snippet_id: str) -> tuple[Optional[str], Optional[dict[str, Any]], Optional[str]]:
-    """
-    Возвращает (content: Optional[str], metadata: Optional[dict], error: Optional[str]).
-    """
     data = load_index()
     found = None
     for s in data.get("snippets", []):
@@ -67,10 +62,6 @@ def get_snippet(snippet_id: str) -> tuple[Optional[str], Optional[dict[str, Any]
 
 
 def inject_snippets_into_code(snippet_ids: list[str], base_code: str) -> tuple[str, list[str]]:
-    """
-    Подставляет код сниппетов в base_code с комментариями // library:<id>.
-    Возвращает (итоговый_код, список_предупреждений).
-    """
     injected_blocks = []
     warnings = []
     for sid in snippet_ids:

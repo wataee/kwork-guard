@@ -3,13 +3,15 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# Pytest
+# Pytest & Coverage
 .pytest_cache/
+.coverage
+htmlcov/
 
 # Runtime and local state
 guard_log.jsonl
-state/*.json
-state/events.jsonl
+state/
+logs/
 tests/tmp_state/
 *.log
 

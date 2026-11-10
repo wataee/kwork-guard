@@ -13,7 +13,16 @@
     "backup_count": 3
   },
   "workspace": {
-    "orders_dir": "C:\\Orders"
+    "orders_dir": "C:\\Orders",
+    "delivery_desktop_dir": "~/Desktop/1C_Delivery"
+  },
+  "onec": {
+    "thin_client_path": "",
+    "test_ib_path": ""
+  },
+  "openrouter": {
+    "model_intake": "google/gemini-2.5-flash",
+    "usd_to_rub": 95.0
   },
   "upstream": {
     "edt_url": "http://127.0.0.1:8765/mcp",

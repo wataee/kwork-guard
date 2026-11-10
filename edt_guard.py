@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 edt_guard.py — лёгкий MCP-прокси между Roo Code и EDT-MCP.
 
@@ -39,6 +38,8 @@ from fastapi.responses import JSONResponse
 
 from guard.cache import ReadCache, is_cacheable_read, is_write_tool
 from guard.config import load_config
+from guard.compactor import compact_mcp_result
+from guard.bsl_linter import lint_bsl_code
 from guard.state import OrderManager
 from guard.library import list_snippets, get_snippet, inject_snippets_into_code
 from guard.macros import (
@@ -47,7 +48,12 @@ from guard.macros import (
     macro_scaffold_processor,
     macro_get_critical_errors,
     macro_patch_method,
+    macro_read_bsl_method,
     macro_complete_order,
+    macro_bsl_syntax_help,
+    macro_bsl_lint_module,
+    macro_get_ai_rules,
+    macro_compact_schema,
 )
 
 CONFIG = load_config()
@@ -57,9 +63,6 @@ CACHE = ReadCache(
     enabled=CONFIG.get("cache", {}).get("enabled", True),
 )
 
-# --------------------------------------------------------------------------- #
-# Конфигурация
-# --------------------------------------------------------------------------- #
 EDT_URL = os.getenv("EDT_MCP_URL", "http://127.0.0.1:8765/mcp")
 EDT_TOKEN = os.getenv("EDT_MCP_TOKEN", "")
 PORT = int(os.getenv("GUARD_PORT", "8766"))
@@ -68,26 +71,22 @@ MAX_DESC_CHARS = int(os.getenv("MAX_DESC_CHARS", "300"))
 LOG_PATH = Path(os.getenv("GUARD_LOG", Path(__file__).with_name("guard_log.jsonl")))
 EVENTS_PATH = Path(os.getenv("GUARD_EVENTS", Path(__file__).parent / "state" / "events.jsonl"))
 
-MAX_SAME_FAILS = 2        # одинаковый вызов (tool+args) провалился столько раз -> блок
-MAX_CONSEC_ERRORS = 5     # столько ошибок подряд (любых) -> СТОП, спроси пользователя
+MAX_SAME_FAILS = 2
+MAX_CONSEC_ERRORS = 5
 LOOP_WINDOW_SEC = 15 * 60
 
-# --- Параметры, взятые из руководств EDT-MCP v2.23.1. Если EDT ругнётся — правь здесь. ---
 MODULE_PATH_TMPL = "ExternalDataProcessors/{name}/ObjectModule.bsl"
 EXTERNAL_OBJECT_TMPL = "ExternalDataProcessor.{name}"
 TEMPLATE_FQN_TMPL = "ExternalDataProcessor.{name}.Template.{template}"
-ERRORS_ARGS = {"severity": "ERRORS", "limit": 20}   # В EDT-MCP фильтр строго "ERRORS" (во множественном числе)
-BUILD_OUTPUT_ARG = "outputDir"                      # имя параметра каталога выгрузки в build_external_objects (обязателен в EDT)
-DEFAULT_BSP_VERSION = "2.2.2.1"                     # версия БСП в СведенияОВнешнейОбработке (см. README этого файла)
+ERRORS_ARGS = {"severity": "ERRORS", "limit": 20}
+BUILD_OUTPUT_ARG = "outputDir"
+DEFAULT_BSP_VERSION = "2.2.2.1"
 
-# --------------------------------------------------------------------------- #
-# Профили: какие инструменты EDT-MCP видит модель
-# --------------------------------------------------------------------------- #
 _COMMON = {
     "list_projects", "get_tool_guide", "get_project_errors",
     "library_list", "library_get",
     "bootstrap_gold", "scaffold_processor", "get_critical_errors", "patch_method",
-    "complete_order",
+    "read_bsl_method", "complete_order",
 }
 
 PROFILES: dict[str, Optional[set[str]]] = {
@@ -108,12 +107,9 @@ PROFILES: dict[str, Optional[set[str]]] = {
         "read_method_source", "get_module_structure", "write_module_source", "find_references",
         "validate_query", "revalidate_objects", "apply_quick_fix", "export_configuration_to_file",
     },
-    "full": None,  # без фильтра — только для отладки
+    "full": None,
 }
 
-# --------------------------------------------------------------------------- #
-# Вспомогательные функции
-# --------------------------------------------------------------------------- #
 def tool_result(text: str, error: bool = False) -> dict:
     return {"content": [{"type": "text", "text": text}], "isError": error}
 
@@ -140,13 +136,11 @@ def is_error(resp: dict) -> bool:
     return bool(_SUCCESS_FALSE.search(result_text(res)[:300]))
 
 
-def cap_text(result: dict) -> dict:
-    """Обрезает слишком длинные текстовые блоки ответа."""
+def cap_text(result: dict, tool_name: str = "") -> dict:
     for item in (result or {}).get("content", []) or []:
         txt = item.get("text")
-        if isinstance(txt, str) and len(txt) > MAX_RESULT_CHARS:
-            cut = len(txt) - MAX_RESULT_CHARS
-            item["text"] = txt[:MAX_RESULT_CHARS] + f"\n…[обрезано {cut} симв. Сузь запрос или уменьши limit]"
+        if isinstance(txt, str):
+            item["text"] = compact_mcp_result(tool_name, txt, MAX_RESULT_CHARS)
     return result
 
 
@@ -160,8 +154,8 @@ def rotate_log(log_path: Path, backup_count: int) -> None:
         dst1 = log_path.with_name(f"{log_path.stem}.1{log_path.suffix}")
         if log_path.is_file():
             log_path.replace(dst1)
-    except Exception:
-        pass
+    except Exception as exc:
+        logging.getLogger("kwork-guard").warning("Log rotation error: %s", exc)
 
 
 def normalize_error_signature(tool: str, err_text: str, note: str) -> str:
@@ -188,8 +182,8 @@ def record_event(profile: str, tool: str, err_text: str, note: str, order_id: st
                 "note": note,
                 "order_id": order_id,
             }, ensure_ascii=False) + "\n")
-    except OSError:
-        pass
+    except OSError as err:
+        LOGGER.warning("IO error: %s", err)
 
 
 def log_call(profile: str, tool: str, ok: bool, ms: int, resp_chars: int,
@@ -216,12 +210,12 @@ def log_call(profile: str, tool: str, ok: bool, ms: int, resp_chars: int,
         
         if not ok:
             record_event(profile, tool, err_text, note, order_id)
-    except OSError:
-        pass
+    except OSError as err:
+        LOGGER.warning("IO error: %s", err)
 
 
 def parse_body(r: httpx.Response) -> Optional[dict]:
-    """Разбирает ответ EDT: обычный JSON или SSE-поток."""
+    
     if not r.content:
         return None
     if "text/event-stream" in r.headers.get("content-type", ""):
@@ -242,9 +236,6 @@ def parse_body(r: httpx.Response) -> Optional[dict]:
     return r.json()
 
 
-# --------------------------------------------------------------------------- #
-# Клиент к EDT-MCP (одна общая сессия, авто-переинициализация)
-# --------------------------------------------------------------------------- #
 class Upstream:
     def __init__(self) -> None:
         self.sid: Optional[str] = None
@@ -301,7 +292,7 @@ class Upstream:
         self._rid += 1
         r = await self.http.post(EDT_URL, headers=self._headers(), json={
             "jsonrpc": "2.0", "id": self._rid, "method": method, "params": params or {}})
-        if r.status_code in (400, 404) and _retry:      # сессия потеряна (рестарт EDT)
+        if r.status_code in (400, 404) and _retry:
             self.ready = False
             return await self.rpc(method, params, _retry=False)
         r.raise_for_status()
@@ -311,7 +302,7 @@ class Upstream:
         return body
 
     async def tool(self, name: str, args: dict) -> tuple[str, bool]:
-        """Вызов инструмента EDT. Возвращает (текст, ошибка?)."""
+        
         try:
             resp = await self.rpc("tools/call", {"name": name, "arguments": args})
         except httpx.HTTPError as e:
@@ -332,9 +323,6 @@ class Upstream:
 
 UP = Upstream()
 
-# --------------------------------------------------------------------------- #
-# Антицикл
-# --------------------------------------------------------------------------- #
 class LoopGuard:
     def __init__(self) -> None:
         self.same: dict[str, tuple[int, float]] = {}
@@ -371,9 +359,6 @@ class LoopGuard:
 
 GUARDS: dict[str, LoopGuard] = {p: LoopGuard() for p in PROFILES}
 
-# --------------------------------------------------------------------------- #
-# Предварительная валидация обычных вызовов
-# --------------------------------------------------------------------------- #
 MODIFY_EXAMPLE = ('Свойства: {"projectName":"П","fqn":"Catalog.X","properties":'
                   '[{"name":"Synonym","value":"Текст"}]}. '
                   'Для макета SpreadsheetDocument вместо properties передают объект "template" '
@@ -393,19 +378,16 @@ def prevalidate(name: str, args: dict) -> Optional[str]:
                 and set(args) <= {"projectName", "fqn"}:
             return "modify_metadata: не указано, что менять. " + MODIFY_EXAMPLE
     if name == "get_tool_guide" and not any(k in args for k in ("mode", "section", "query")):
-        args["mode"] = "summary"     # не тянем справку целиком
+        args["mode"] = "summary"
     return None
 
 
-# --------------------------------------------------------------------------- #
-# Макросы
-# --------------------------------------------------------------------------- #
 IDENT = re.compile(r"^[A-Za-zА-Яа-яЁё_][A-Za-zА-Яа-яЁё0-9_]*$")
 PURPOSE = re.compile(r"^[A-Za-zА-Яа-яЁё]+\.[A-Za-zА-Яа-яЁё_][A-Za-zА-Яа-яЁё0-9_]*$")
 
 
 def bsl(s: str) -> str:
-    """Безопасная вставка текста в строковый литерал BSL и НСтр."""
+    
     return str(s).replace('"', '""').replace("'", "’")
 
 
@@ -579,28 +561,77 @@ MACRO_TOOLS: dict[str, dict] = {
             "required": ["projectName"],
         },
     },
+    "read_bsl_method": {
+        "name": "read_bsl_method",
+        "description": "Извлекает конкретную функцию или процедуру из модуля BSL по имени с директивами компиляции и номерами строк без чтения всего файла.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "projectName": {"type": "string", "description": "Имя проекта в EDT"},
+                "modulePath": {"type": "string", "description": "Путь к модулю BSL"},
+                "methodName": {"type": "string", "description": "Имя функции или процедуры"},
+            },
+            "required": ["projectName", "modulePath", "methodName"],
+        },
+    },
+    "bsl_syntax_help": {
+        "name": "bsl_syntax_help",
+        "description": "Синтакс-помощник платформы 1С:Предприятие. Защита от галлюцинаций.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+        },
+    },
+    "bsl_lint_module": {
+        "name": "bsl_lint_module",
+        "description": "Статический анализ модуля BSL на 10 стандартов качества.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"code": {"type": "string"}},
+            "required": ["code"],
+        },
+    },
+    "get_ai_rules": {
+        "name": "get_ai_rules",
+        "description": "Возвращает свод правил и стандартов разработки BSL.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    "compact_schema": {
+        "name": "compact_schema",
+        "description": "Преобразует структуру метаданных в ультра-компактный JSON.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"metadata": {"type": "object"}},
+            "required": ["metadata"],
+        },
+    },
 }
 
 PROFILE_MACROS: dict[str, list[str]] = {
     "vpf": [
         "scaffold_vpf", "build_and_check", "library_list", "library_get",
         "bootstrap_gold", "scaffold_processor", "get_critical_errors", "patch_method",
-        "complete_order"
+        "read_bsl_method", "complete_order", "bsl_syntax_help", "bsl_lint_module",
+        "get_ai_rules", "compact_schema"
     ],
     "report": [
         "scaffold_report", "build_and_check", "library_list", "library_get",
         "bootstrap_gold", "scaffold_processor", "get_critical_errors", "patch_method",
-        "complete_order"
+        "read_bsl_method", "complete_order", "bsl_syntax_help", "bsl_lint_module",
+        "get_ai_rules", "compact_schema"
     ],
     "ext": [
         "library_list", "library_get",
         "bootstrap_gold", "scaffold_processor", "get_critical_errors", "patch_method",
-        "complete_order"
+        "read_bsl_method", "complete_order", "bsl_syntax_help", "bsl_lint_module",
+        "get_ai_rules", "compact_schema"
     ],
     "full": [
         "scaffold_vpf", "scaffold_report", "scaffold_processor", "build_and_check",
         "library_list", "library_get", "bootstrap_gold", "get_critical_errors", "patch_method",
-        "complete_order"
+        "read_bsl_method", "complete_order", "bsl_syntax_help", "bsl_lint_module",
+        "get_ai_rules", "compact_schema"
     ],
 }
 
@@ -671,7 +702,7 @@ def build_template(a: dict) -> dict:
 
 
 def default_data_code(a: dict) -> str:
-    lines = ["\t// TODO(ai): заполнить данные из Ссылка. Поля шапки, строки таблицы и итог задаются здесь."]
+    lines = ["\t// Заполнить данные: заполнить данные из Ссылка. Поля шапки, строки таблицы и итог задаются здесь."]
     for f in a.get("header_fields") or []:
         lines.append(f'\tПараметрыШапки.Вставить("{f["parameter"]}", "");')
     lines.append('\tПараметрыПодвала.Вставить("Итого", 0);')
@@ -927,6 +958,26 @@ async def wrap_complete_order(a: dict) -> dict:
     return await macro_complete_order(a, UP)
 
 
+async def wrap_read_bsl_method(a: dict) -> dict:
+    return await macro_read_bsl_method(a, UP)
+
+
+async def wrap_bsl_syntax_help(a: dict) -> dict:
+    return macro_bsl_syntax_help(a)
+
+
+async def wrap_bsl_lint_module(a: dict) -> dict:
+    return macro_bsl_lint_module(a)
+
+
+async def wrap_get_ai_rules(a: dict) -> dict:
+    return macro_get_ai_rules(a)
+
+
+async def wrap_compact_schema(a: dict) -> dict:
+    return macro_compact_schema(a)
+
+
 MACRO_IMPL = {
     "scaffold_vpf": macro_scaffold_vpf,
     "build_and_check": macro_build_and_check,
@@ -937,12 +988,14 @@ MACRO_IMPL = {
     "scaffold_processor": wrap_scaffold_processor,
     "get_critical_errors": wrap_get_critical_errors,
     "patch_method": wrap_patch_method,
+    "read_bsl_method": wrap_read_bsl_method,
     "complete_order": wrap_complete_order,
+    "bsl_syntax_help": wrap_bsl_syntax_help,
+    "bsl_lint_module": wrap_bsl_lint_module,
+    "get_ai_rules": wrap_get_ai_rules,
+    "compact_schema": wrap_compact_schema,
 }
 
-# --------------------------------------------------------------------------- #
-# HTTP-слой (MCP Streamable HTTP, ответы обычным JSON)
-# --------------------------------------------------------------------------- #
 app = FastAPI(title="edt-guard")
 
 
@@ -968,12 +1021,14 @@ async def admin_reset() -> dict:
 
 
 @app.get("/mcp/{profile}")
-async def mcp_get(profile: str) -> Response:
-    return Response(status_code=405)      # SSE-поток не поддерживаем, это допустимо по спецификации
+@app.get("/mcp/{profile}/{order_id}")
+async def mcp_get(profile: str, order_id: Optional[str] = None) -> Response:
+    return Response(status_code=405)
 
 
 @app.delete("/mcp/{profile}")
-async def mcp_delete(profile: str) -> Response:
+@app.delete("/mcp/{profile}/{order_id}")
+async def mcp_delete(profile: str, order_id: Optional[str] = None) -> Response:
     return Response(status_code=200)
 
 
@@ -1004,7 +1059,8 @@ def is_loopback(req: Request) -> bool:
 
 
 @app.post("/mcp/{profile}")
-async def mcp_post(profile: str, req: Request) -> Response:
+@app.post("/mcp/{profile}/{order_id}")
+async def mcp_post(profile: str, req: Request, order_id: Optional[str] = None) -> Response:
     if profile not in PROFILES:
         return rpc_err(None, -32602, f"Неизвестный профиль {profile}. Доступны: {', '.join(PROFILES)}")
     msg = await req.json()
@@ -1017,13 +1073,13 @@ async def mcp_post(profile: str, req: Request) -> Response:
         return rpc_ok(mid, {
             "protocolVersion": params.get("protocolVersion", "2025-03-26"),
             "capabilities": {"tools": {"listChanged": False}},
-            "serverInfo": {"name": f"edt-guard/{profile}", "version": "1.0"}})
+            "serverInfo": {"name": f"edt-guard/{profile}", "version": "2.0"}})
     if method == "ping":
         return rpc_ok(mid, {})
     if method == "tools/list":
         return await handle_list(profile, mid)
     if method == "tools/call":
-        return await handle_call(profile, mid, params, req)
+        return await handle_call(profile, mid, params, req, order_id)
     if method in ("resources/list", "prompts/list"):
         return rpc_ok(mid, {method.split("/")[0]: []})
     return rpc_err(mid, -32601, f"Метод не поддерживается: {method}")
@@ -1049,19 +1105,18 @@ async def handle_list(profile: str, mid: Any) -> JSONResponse:
     return rpc_ok(mid, {"tools": tools})
 
 
-async def handle_call(profile: str, mid: Any, params: dict, req: Request) -> JSONResponse:
+async def handle_call(profile: str, mid: Any, params: dict, req: Request, path_order_id: Optional[str] = None) -> JSONResponse:
     name = params.get("name", "")
     args = params.get("arguments") or {}
     t0 = time.time()
     allow = PROFILES[profile]
     guard = GUARDS[profile]
 
-    # Определение заказа и проекта
-    order_id = ORDER_MGR.resolve_order_id(dict(req.headers), args)
+    order_id = ORDER_MGR.resolve_order_id(dict(req.headers), args, path_order_id)
     project_name = args.get("projectName") or "common"
 
     def done(result: dict, note: str = "", cache_hit: bool = False, warn: Optional[str] = None) -> JSONResponse:
-        result = cap_text(result)
+        result = cap_text(result, name)
         if warn and not result.get("isError"):
             for item in result.get("content", []):
                 if item.get("type") == "text":
@@ -1080,23 +1135,39 @@ async def handle_call(profile: str, mid: Any, params: dict, req: Request) -> JSO
     if not is_macro and allow is not None and name not in allow:
         return done(tool_result(f"Инструмент {name} недоступен в профиле {profile}.", True), "not_in_profile")
 
-    # Проверка бюджета заказа (WP1)
+    if name == "write_module_source":
+        src_code = str(args.get("source") or "")
+        m_path = str(args.get("modulePath") or "")
+        is_obj = "ObjectModule.bsl" in m_path or "МодульОбъекта" in m_path
+        issues = lint_bsl_code(src_code, profile=profile, is_object_module=is_obj)
+        err_issues = [i for i in issues if i.severity == "ERROR"]
+        if err_issues:
+            err_msg = "BSL Линтер обнаружил критические ошибки (запись заблокирована без списания бюджета):\n" + "\n".join(f"[{i.code}] Строка {i.line}: {i.message}" for i in err_issues)
+            await ORDER_MGR.record_call(order_id, name, False, 0, blocked_reason="linter_blocked")
+            return done(tool_result(err_msg, True), "linter_error")
+
+    if name == "patch_method":
+        src_code = str(args.get("new_source") or "")
+        issues = lint_bsl_code(src_code, profile=profile, is_object_module=False)
+        err_issues = [i for i in issues if i.severity == "ERROR"]
+        if err_issues:
+            err_msg = "BSL Линтер обнаружил критические ошибки в новом методе (замена заблокирована без списания бюджета):\n" + "\n".join(f"[{i.code}] Строка {i.line}: {i.message}" for i in err_issues)
+            await ORDER_MGR.record_call(order_id, name, False, 0, blocked_reason="linter_blocked")
+            return done(tool_result(err_msg, True), "linter_error")
+
     blocked, budget_msg = await ORDER_MGR.check_budget(order_id, name)
     if blocked:
         await ORDER_MGR.record_call(order_id, name, False, 0, blocked_reason="budget_exceeded")
         return done(tool_result(budget_msg or "Бюджет заказа исчерпан.", True), "budget_blocked")
 
-    # Проверка кеша чтений (WP7)
     cached_result = CACHE.get(project_name, name, args)
     if cached_result is not None:
         return done(cached_result, note="cache_hit", cache_hit=True)
 
-    # Проверка антицикла
     if (stop := guard.check(name, args)):
         await ORDER_MGR.record_call(order_id, name, False, 0, blocked_reason="loop_block")
         return done(tool_result(stop, True), "loop_block")
 
-    # Локальная предвалидация
     if (err := prevalidate(name, args)):
         guard.record(name, args, True)
         await ORDER_MGR.record_call(order_id, name, False, len(err), blocked_reason="prevalidate")
@@ -1109,7 +1180,8 @@ async def handle_call(profile: str, mid: Any, params: dict, req: Request) -> JSO
         resp_chars = len(result_text(result))
         await ORDER_MGR.record_call(order_id, name, not failed, resp_chars)
         if not failed and is_write_tool(name):
-            CACHE.invalidate_project(project_name)
+            hint = args.get("objectName") or args.get("name") or args.get("modulePath") or args.get("methodName")
+            CACHE.invalidate_object(project_name, hint)
         return done(result, "macro", warn=budget_msg)
 
     try:
@@ -1129,10 +1201,10 @@ async def handle_call(profile: str, mid: Any, params: dict, req: Request) -> JSO
     resp_chars = len(result_text(res))
     await ORDER_MGR.record_call(order_id, name, not failed, resp_chars)
 
-    # Инвалидация или запись в кеш
     if not failed:
         if is_write_tool(name):
-            CACHE.invalidate_project(project_name)
+            hint = args.get("objectName") or args.get("name") or args.get("modulePath") or args.get("methodName")
+            CACHE.invalidate_object(project_name, hint)
         elif is_cacheable_read(name):
             CACHE.put(project_name, name, args, res)
 

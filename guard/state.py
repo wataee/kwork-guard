@@ -1,13 +1,13 @@
-"""guard/state.py - Отслеживание состояния заказов, бюджетов и вызовов (WP1)."""
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
+from logging.handlers import RotatingFileHandler
 import os
+from pathlib import Path
 import re
 import time
-from pathlib import Path
 from typing import Any, Optional
 
 from guard.config import load_config
@@ -16,7 +16,6 @@ logger = logging.getLogger("kwork-guard.state")
 
 SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
-# Инструменты, которые разрешено вызывать даже при исчерпании бюджета (спасительные гейты)
 ALLOWED_AFTER_LIMIT = {
     "get_project_errors",
     "get_critical_errors",
@@ -42,6 +41,8 @@ class OrderState:
         self.total_response_chars = 0
         self.errors_count = 0
         self.extra_calls_allowed = 0
+        self.real_cost_usd = 0.0
+        self.real_cost_rub = 0.0
         self.blocked_calls: list[dict[str, Any]] = []
         self._lock: Optional[asyncio.Lock] = None
 
@@ -59,6 +60,8 @@ class OrderState:
             "total_response_chars": self.total_response_chars,
             "errors_count": self.errors_count,
             "extra_calls_allowed": self.extra_calls_allowed,
+            "real_cost_usd": self.real_cost_usd,
+            "real_cost_rub": self.real_cost_rub,
             "blocked_calls": self.blocked_calls,
         }
 
@@ -69,6 +72,8 @@ class OrderState:
         self.total_response_chars = data.get("total_response_chars", 0)
         self.errors_count = data.get("errors_count", 0)
         self.extra_calls_allowed = data.get("extra_calls_allowed", 0)
+        self.real_cost_usd = float(data.get("real_cost_usd", 0.0))
+        self.real_cost_rub = float(data.get("real_cost_rub", 0.0))
         self.blocked_calls = data.get("blocked_calls", [])
 
     def save(self) -> None:
@@ -76,11 +81,11 @@ class OrderState:
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
         tmp_file = self.state_file.with_suffix(".tmp")
         try:
-            with tmp_file.open("w", encoding="utf-8") as f:
-                json.dump(self.to_dict(), f, ensure_ascii=False, indent=2)
+            with tmp_file.open("w", encoding="utf-8") as file_handle:
+                json.dump(self.to_dict(), file_handle, ensure_ascii=False, indent=2)
             tmp_file.replace(self.state_file)
         except Exception as exc:
-            logger.error("Ошибка сохранения состояния заказа %s: %exc", self.order_id, exc)
+            logger.error("State save failure for %s: %s", self.order_id, exc)
 
 
 class OrderManager:
@@ -98,16 +103,28 @@ class OrderManager:
         return self._manager_lock
 
     @staticmethod
-    def resolve_order_id(headers: dict[str, str], arguments: dict[str, Any]) -> str:
-        # 1. Заголовок X-Order-Id
+    def resolve_order_id(
+        headers: dict[str, str],
+        arguments: dict[str, Any],
+        path_order_id: Optional[str] = None,
+    ) -> str:
+        if path_order_id:
+            cleaned_path = sanitize_order_id(path_order_id)
+            if cleaned_path != "default":
+                return cleaned_path
+
         header_id = headers.get("x-order-id") or headers.get("X-Order-Id")
         if header_id:
-            return sanitize_order_id(header_id)
-        # 2. Имя проекта в аргументах
+            cleaned_header = sanitize_order_id(header_id)
+            if cleaned_header != "default":
+                return cleaned_header
+
         proj = arguments.get("projectName") or arguments.get("name")
         if proj and isinstance(proj, str):
-            return sanitize_order_id(proj)
-        # 3. По умолчанию
+            cleaned_proj = sanitize_order_id(proj)
+            if cleaned_proj != "default":
+                return cleaned_proj
+
         return "default"
 
     async def get_order(self, order_id: str) -> OrderState:
@@ -119,11 +136,11 @@ class OrderManager:
             state = OrderState(safe_id, self.state_dir)
             if state.state_file.is_file():
                 try:
-                    with state.state_file.open("r", encoding="utf-8") as f:
-                        data = json.load(f)
+                    with state.state_file.open("r", encoding="utf-8") as file_handle:
+                        data = json.load(file_handle)
                     state.load_from_dict(data)
                 except Exception as exc:
-                    logger.warning("Поврежденный файл состояния заказа %s (%s). Создаётся новое состояние.", safe_id, exc)
+                    logger.warning("Corrupted order state %s (%s), recreating.", safe_id, exc)
                     state.save()
             else:
                 state.save()
@@ -132,11 +149,6 @@ class OrderManager:
             return state
 
     async def check_budget(self, order_id: str, tool_name: str) -> tuple[bool, Optional[str]]:
-        """
-        Проверяет бюджет заказа.
-        Возвращает:
-          (is_blocked: bool, warning_or_stop_message: Optional[str])
-        """
         config = load_config()
         limits = config.get("limits", {})
         max_calls = limits.get("max_calls_per_order", 25)
@@ -146,27 +158,23 @@ class OrderManager:
         state = await self.get_order(order_id)
         effective_limit = max_calls + state.extra_calls_allowed
 
-        # Если инструмент разрешён после лимита (спасительный гейт), не блокируем
         if tool_name in ALLOWED_AFTER_LIMIT:
             return False, None
 
-        # Проверка жесткого лимита вызовов
         if state.calls_count >= effective_limit:
-            msg = (
+            message = (
                 f"Бюджет заказа '{order_id}' исчерпан ({state.calls_count}/{effective_limit} вызовов). "
                 f"Сообщи пользователю итог и жди указаний."
             )
-            return True, msg
+            return True, message
 
-        # Проверка жесткого лимита символов ответов
         if state.total_response_chars >= max_chars:
-            msg = (
+            message = (
                 f"Бюджет контекста заказа '{order_id}' исчерпан ({state.total_response_chars}/{max_chars} симв). "
                 f"Сообщи пользователю итог и жди указаний."
             )
-            return True, msg
+            return True, message
 
-        # Проверка порога предупреждения (например, 80%)
         warn_threshold = int(effective_limit * warn_ratio)
         if state.calls_count >= warn_threshold:
             pct = int((state.calls_count / effective_limit) * 100)
@@ -222,11 +230,10 @@ class OrderManager:
 
     async def list_orders(self) -> list[dict[str, Any]]:
         results = []
-        # Сканируем state_dir
-        for file in sorted(self.state_dir.glob("*.json")):
-            if file.name == "events.json":
+        for file_item in sorted(self.state_dir.glob("*.json")):
+            if file_item.name == "events.json":
                 continue
-            safe_id = file.stem
+            safe_id = file_item.stem
             state = await self.get_order(safe_id)
             results.append(state.to_dict())
         return results

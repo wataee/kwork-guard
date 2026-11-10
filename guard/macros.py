@@ -1,13 +1,19 @@
-"""guard/macros.py - Пакет макросов экстремальной экономии токенов (WP2)."""
 from __future__ import annotations
+
+from guard.bsl_linter import lint_bsl_code
+from guard.compact_schema import compact_metadata_schema, format_schema_summary
+from guard.platform_context import PlatformContextService
 
 import datetime
 import json
+import logging
 import re
 import shutil
 import subprocess
 from pathlib import Path
 from typing import Any, Optional
+
+logger = logging.getLogger("kwork-guard.macros")
 
 GOLD_TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "gold_templates"
 TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
@@ -23,9 +29,6 @@ def tool_result(text: str, is_error: bool = False) -> dict:
     return {"content": [{"type": "text", "text": text}], "isError": is_error}
 
 
-# --------------------------------------------------------------------------- #
-# 1. bootstrap_gold
-# --------------------------------------------------------------------------- #
 def macro_bootstrap_gold(a: dict) -> dict:
     tpl_name = a.get("template_name", "")
     target_dir_str = a.get("target_dir", "")
@@ -59,14 +62,11 @@ def macro_bootstrap_gold(a: dict) -> dict:
 
     target_dir.mkdir(parents=True, exist_ok=True)
 
-    # Старое базовое имя шаблона
     old_name = "ШаблонВПФ" if "vpf" in tpl_name else "ШаблонОтчета"
 
-    # Копируем дерево файлов с подстановкой
     copied_files = 0
     for item in src_dir.rglob("*"):
         rel = item.relative_to(src_dir)
-        # Подменяем имя в пути
         parts = [p.replace(old_name, new_name) for p in rel.parts]
         dst_path = target_dir.joinpath(*parts)
 
@@ -76,7 +76,6 @@ def macro_bootstrap_gold(a: dict) -> dict:
             dst_path.parent.mkdir(parents=True, exist_ok=True)
             try:
                 text = item.read_text(encoding="utf-8")
-                # Подменяем имя в содержимом
                 text = text.replace(old_name, new_name)
                 dst_path.write_text(text, encoding="utf-8")
             except UnicodeDecodeError:
@@ -89,9 +88,6 @@ def macro_bootstrap_gold(a: dict) -> dict:
     )
 
 
-# --------------------------------------------------------------------------- #
-# 2. scaffold_report
-# --------------------------------------------------------------------------- #
 def build_report_module(a: dict) -> str:
     name = a["name"]
     title = bsl_escape(a.get("title") or name)
@@ -159,13 +155,11 @@ async def macro_scaffold_report(a: dict, upstream) -> dict:
         steps.append(f"✗ {label}")
         return tool_result(f"scaffold_report остановлен.\n" + "\n".join(steps) + "\n" + text[:700], True)
 
-    # 1. Валидация запроса
     text, bad = await upstream.tool("validate_query", {"query": query})
     if bad:
         return fail("validate_query", text)
     steps.append("✓ validate_query")
 
-    # 2. Создание проекта
     if not a.get("skip_create_project"):
         text, bad = await upstream.tool("create_project", {
             "projectKind": "externalObjects",
@@ -176,7 +170,6 @@ async def macro_scaffold_report(a: dict, upstream) -> dict:
             return fail("create_project", text)
         steps.append("✓ create_project")
 
-    # 3. Создание макета СКД
     text, bad = await upstream.tool("create_metadata", {
         "projectName": name,
         "fqn": f"ExternalReport.{name}.Template.ОсновнаяСхемаКомпоновкиДанных",
@@ -186,7 +179,6 @@ async def macro_scaffold_report(a: dict, upstream) -> dict:
         return fail("create_metadata (СКД)", text)
     steps.append("✓ create_metadata (СКД)")
 
-    # 4. Настройка схемы СКД
     text, bad = await upstream.tool("dcs", {
         "projectName": name,
         "schema": f"ExternalReport.{name}.Template.ОсновнаяСхемаКомпоновкиДанных",
@@ -196,7 +188,6 @@ async def macro_scaffold_report(a: dict, upstream) -> dict:
         return fail("dcs (настройка схемы)", text)
     steps.append("✓ dcs (настройка схемы)")
 
-    # 5. Запись модуля объекта
     module_path = f"ExternalReports/{name}/ObjectModule.bsl"
     text, bad = await upstream.tool("write_module_source", {
         "projectName": name,
@@ -213,9 +204,6 @@ async def macro_scaffold_report(a: dict, upstream) -> dict:
     return tool_result("\n".join(steps))
 
 
-# --------------------------------------------------------------------------- #
-# 3. scaffold_processor
-# --------------------------------------------------------------------------- #
 def build_processor_module(a: dict) -> str:
     name = a["name"]
     title = bsl_escape(a.get("command_title") or name)
@@ -288,7 +276,6 @@ async def macro_scaffold_processor(a: dict, upstream) -> dict:
         steps.append(f"✗ {label}")
         return tool_result(f"scaffold_processor остановлен.\n" + "\n".join(steps) + "\n" + text[:700], True)
 
-    # 1. Создание проекта
     if not a.get("skip_create_project"):
         text, bad = await upstream.tool("create_project", {
             "projectKind": "externalObjects",
@@ -299,7 +286,6 @@ async def macro_scaffold_processor(a: dict, upstream) -> dict:
             return fail("create_project", text)
         steps.append("✓ create_project")
 
-    # 2. Запись модуля объекта
     module_path = f"ExternalDataProcessors/{name}/ObjectModule.bsl"
     text, bad = await upstream.tool("write_module_source", {
         "projectName": name,
@@ -316,9 +302,6 @@ async def macro_scaffold_processor(a: dict, upstream) -> dict:
     return tool_result("\n".join(steps))
 
 
-# --------------------------------------------------------------------------- #
-# 4. get_critical_errors
-# --------------------------------------------------------------------------- #
 async def macro_get_critical_errors(a: dict, upstream) -> dict:
     project = a.get("projectName", "")
     limit = int(a.get("limit", 10))
@@ -329,14 +312,12 @@ async def macro_get_critical_errors(a: dict, upstream) -> dict:
     if bad:
         return tool_result(f"get_critical_errors: ошибка получения списка:\n{text[:500]}", True)
 
-    # Проверка отсутствия ошибок
     if re.search(r"(?i)(no\s+(?:validation\s+)?errors|ошибок\s+нет|0\s+errors|не\s+найден)", text):
         return tool_result(f"✓ В проекте '{project}' критических ошибок не обнаружено.")
 
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     critical_lines = []
     for line in lines:
-        # Пропускаем информационный мусор и стиль
         if re.search(r"(?i)(warning|info|предупреждение|замечание)", line):
             continue
         if re.search(r"(?i)(error|ошиб|syntax|неизвестн|не определен)", line):
@@ -355,9 +336,6 @@ async def macro_get_critical_errors(a: dict, upstream) -> dict:
     return tool_result(summary, is_error=True)
 
 
-# --------------------------------------------------------------------------- #
-# 5. patch_method
-# --------------------------------------------------------------------------- #
 METHOD_REGEX = re.compile(
     r"(?P<prefix>(?:Экспортный\s+)?(?:Процедура|Функция)\s+(?P<name>[A-Za-zА-Яа-я0-9_]+)\s*\([^)]*\).*?Конец(?:Процедуры|Функции))",
     re.DOTALL | re.IGNORECASE
@@ -375,19 +353,16 @@ async def macro_patch_method(a: dict, upstream) -> dict:
     if not project or not module_path or not method_name or not new_source:
         return tool_result("patch_method: требуются projectName, modulePath, methodName и new_source.", True)
 
-    # Читаем исходный код модуля
     text, bad = await upstream.tool("read_module_source", {"projectName": project, "modulePath": module_path})
     if bad:
         return tool_result(f"patch_method: не удалось прочитать модуль {module_path}:\n{text[:500]}", True)
 
-    # Ищем метод
     pattern = re.compile(
         rf"((?:Экспортный\s+)?(?:Процедура|Функция)\s+{re.escape(method_name)}\s*\([^)]*\).*?Конец(?:Процедуры|Функции))",
         re.DOTALL | re.IGNORECASE
     )
     match = pattern.search(text)
     if not match:
-        # Найдем все методы для подсказки
         found_methods = [m.group("name") for m in METHOD_REGEX.finditer(text)]
         return tool_result(
             f"patch_method: метод '{method_name}' не найден в {module_path}.\n"
@@ -427,9 +402,35 @@ async def macro_patch_method(a: dict, upstream) -> dict:
     return tool_result(f"✓ Метод '{method_name}' в {module_path} успешно обновлен ({wrap_mode}).")
 
 
-# --------------------------------------------------------------------------- #
-# 6. complete_order
-# --------------------------------------------------------------------------- #
+async def macro_read_bsl_method(a: dict, upstream) -> dict:
+    project = a.get("projectName", "")
+    module_path = a.get("modulePath", "")
+    method_name = a.get("methodName", "")
+
+    if not project or not module_path or not method_name:
+        return tool_result("read_bsl_method: требуются projectName, modulePath и methodName.", True)
+
+    text, bad = await upstream.tool("read_module_source", {"projectName": project, "modulePath": module_path})
+    if bad:
+        return tool_result(f"read_bsl_method: ошибка чтения модуля {module_path}:\n{text[:500]}", True)
+
+    pattern = re.compile(
+        rf"(?ims)^([\t ]*(?:&[А-Яа-яA-Za-z0-9_]+\s*)*^[\t ]*(?:Процедура|Функция)\s+{re.escape(method_name)}\s*\(.*?^[\t ]*Конец(?:Процедуры|Функции))",
+        re.MULTILINE | re.DOTALL,
+    )
+    match = pattern.search(text)
+    if not match:
+        return tool_result(f"read_bsl_method: метод '{method_name}' не найден в модуле '{module_path}'.", True)
+
+    method_code = match.group(1)
+    start_char = match.start(1)
+    start_line = text[:start_char].count("\n") + 1
+    end_line = start_line + method_code.count("\n")
+
+    header = f"// Метод: {method_name} ({module_path}, строки {start_line}-{end_line})\n"
+    return tool_result(header + method_code)
+
+
 async def macro_complete_order(a: dict, upstream) -> dict:
     project = a.get("projectName", "")
     if not project:
@@ -458,7 +459,6 @@ async def macro_complete_order(a: dict, upstream) -> dict:
 
     steps: list[str] = []
 
-    # 1. Проверка ошибок
     text, bad = await upstream.tool("get_project_errors", {"projectName": project, "severity": "ERRORS", "limit": 20})
     if bad:
         return tool_result(f"complete_order: ошибка при вызове get_project_errors:\n{text[:500]}", True)
@@ -469,7 +469,6 @@ async def macro_complete_order(a: dict, upstream) -> dict:
         return tool_result(f"complete_order: в проекте обнаружены ошибки компиляции, сдача отменена:\n{text[:1500]}", True)
     steps.append("✓ Проверка: ошибок нет")
 
-    # 2. Сборка объекта
     out_dir.mkdir(parents=True, exist_ok=True)
     btext, bbad = await upstream.tool("build_external_objects", {
         "projectName": project,
@@ -480,7 +479,6 @@ async def macro_complete_order(a: dict, upstream) -> dict:
         return tool_result(f"complete_order: сборка не удалась:\n{btext[:500]}", True)
     steps.append(f"✓ Сборка: файлы выгружены в {out_dir}")
 
-    # 3. Формирование пакета документов
     context = {
         "object_name": obj_name,
         "client_name": client_name,
@@ -507,7 +505,6 @@ async def macro_complete_order(a: dict, upstream) -> dict:
         (out_dir / target_name).write_text(content, encoding="utf-8")
         steps.append(f"✓ Документ: {target_name}")
 
-    # 4. Git commit
     if git_commit:
         try:
             res_stat = subprocess.run(
@@ -534,7 +531,6 @@ async def macro_complete_order(a: dict, upstream) -> dict:
         except Exception as e:
             steps.append(f"• Git: пропущено ({e})")
 
-    # 5. Обновление order.json при наличии
     for check_dir in [out_dir, out_dir.parent, Path.cwd()]:
         oj = check_dir / "order.json"
         if oj.is_file():
@@ -545,8 +541,8 @@ async def macro_complete_order(a: dict, upstream) -> dict:
                 oj.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
                 steps.append("✓ order.json: статус обновлен на 'delivered'")
                 break
-            except Exception:
-                pass
+            except Exception as update_exc:
+                logger.warning("Order json update failed during completion: %s", update_exc)
 
     summary = (
         f"★ Пакет заказа {order_id} ({obj_name}) успешно сформирован!\n" +
@@ -554,3 +550,39 @@ async def macro_complete_order(a: dict, upstream) -> dict:
         f"Готовые файлы находятся в: {out_dir}"
     )
     return tool_result(summary)
+
+def macro_bsl_syntax_help(a: dict) -> dict:
+    svc = PlatformContextService()
+    query = a.get("query", "")
+    text = svc.format_syntax_help(query)
+    return tool_result(text)
+
+
+def macro_bsl_lint_module(a: dict) -> dict:
+    code = a.get("code", "")
+    profile = a.get("profile", "common")
+    is_obj = bool(a.get("is_object_module", False))
+    issues = lint_bsl_code(code, profile=profile, is_object_module=is_obj)
+    if not issues:
+        return tool_result("Статический анализ BSL пройден: 0 ошибок и замечаний.")
+    lines = [f"Обнаружено {len(issues)} замечаний BSL:"]
+    for iss in issues:
+        lines.append(f"- [{iss.severity}] Строка {iss.line} ({iss.code}): {iss.message}")
+    return tool_result("\n".join(lines), is_error=any(i.severity == "ERROR" for i in issues))
+
+
+def macro_get_ai_rules(a: dict) -> dict:
+    rules_file = TEMPLATES_DIR / "bsl_ai_rules.md"
+    if rules_file.is_file():
+        return tool_result(rules_file.read_text(encoding="utf-8"))
+    return tool_result("Файл bsl_ai_rules.md не найден.", True)
+
+
+def macro_compact_schema(a: dict) -> dict:
+    raw = a.get("metadata", {})
+    if not isinstance(raw, dict):
+        return tool_result("compact_schema: параметр metadata должен быть словарем (JSON).", True)
+    compacted = compact_metadata_schema(raw)
+    summary = format_schema_summary(compacted)
+    return tool_result(summary)
+

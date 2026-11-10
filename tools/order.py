@@ -1,27 +1,25 @@
-#!/usr/bin/env python3
-"""
-tools/order.py - Единый менеджер жизненного цикла заказов Kwork (CRM + Git + MCP).
-Связывает папки заказов, версионирование, гарантийные правки, контроль токенов и CLIENTS.md.
-"""
 from __future__ import annotations
 
 import argparse
 import datetime
 import json
+import logging
 import os
+from pathlib import Path
 import re
 import shutil
 import subprocess
 import sys
-from pathlib import Path
 from typing import Any, Optional
+
+logger = logging.getLogger("kwork-guard.order")
 
 if sys.platform == "win32":
     try:
         sys.stdout.reconfigure(encoding="utf-8")
         sys.stderr.reconfigure(encoding="utf-8")
-    except Exception:
-        pass
+    except Exception as stream_exc:
+        logger.warning("Stream reconfigure failed: %s", stream_exc)
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 CONFIG_PATH = ROOT_DIR / "config.json"
@@ -42,6 +40,49 @@ STATUS_EMOJI = {
 }
 
 
+def build_mcp_config(
+    profile: str,
+    order_id: str,
+    guard_host: str = "127.0.0.1",
+    guard_port: int = 8766,
+) -> dict[str, Any]:
+    if profile == "intake":
+        return {"mcpServers": {}}
+    mapped_profile = profile if profile in ("vpf", "report", "ext", "processor") else "ext"
+    return {
+        "mcpServers": {
+            "edt": {
+                "type": "streamable-http",
+                "url": f"http://{guard_host}:{guard_port}/mcp/{mapped_profile}/{order_id}",
+                "headers": {"X-Order-Id": order_id},
+                "timeout": 600,
+            }
+        }
+    }
+
+
+def repair_order_mcp_config(
+    order_dir: Path,
+    guard_host: str = "127.0.0.1",
+    guard_port: int = 8766,
+) -> bool:
+    try:
+        if not order_dir.is_dir():
+            return False
+        data = load_order_json(order_dir) or {}
+        kind = data.get("kind", "ext")
+        order_id = data.get("order_id", order_dir.name)
+        mcp_profile = kind if kind in ("vpf", "report", "ext", "intake") else "ext"
+        cfg = build_mcp_config(mcp_profile, order_id, guard_host, guard_port)
+        roo_dir = order_dir / ".roo"
+        roo_dir.mkdir(parents=True, exist_ok=True)
+        (roo_dir / "mcp.json").write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+        return True
+    except Exception as exc:
+        logger.warning("Failed to repair MCP config for %s: %s", order_dir, exc)
+        return False
+
+
 def get_orders_dir(override: Optional[str] = None) -> Path:
     if override:
         return Path(override)
@@ -50,13 +91,13 @@ def get_orders_dir(override: Optional[str] = None) -> Path:
         return Path(env_dir)
     if CONFIG_PATH.is_file():
         try:
-            with CONFIG_PATH.open("r", encoding="utf-8") as f:
-                cfg = json.load(f)
+            with CONFIG_PATH.open("r", encoding="utf-8") as file_handle:
+                cfg = json.load(file_handle)
                 configured = cfg.get("workspace", {}).get("orders_dir")
                 if configured:
                     return Path(configured)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Config read orders_dir error: %s", exc)
     return Path(r"C:\Orders")
 
 
@@ -65,35 +106,34 @@ def load_order_json(order_dir: Path) -> Optional[dict[str, Any]]:
     if not p.is_file():
         return None
     try:
-        with p.open("r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
+        with p.open("r", encoding="utf-8") as file_handle:
+            return json.load(file_handle)
+    except Exception as exc:
+        logger.warning("Failed to load order.json in %s: %s", order_dir, exc)
         return None
 
 
 def save_order_json(order_dir: Path, data: dict[str, Any]) -> None:
     p = order_dir / "order.json"
-    with p.open("w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    with p.open("w", encoding="utf-8") as file_handle:
+        json.dump(data, file_handle, ensure_ascii=False, indent=2)
 
 
 def get_token_stats(order_id: str) -> dict[str, Any]:
-    """Получает статистику вызовов и токенов из guard/state."""
     state_file = STATE_DIR / f"{order_id}.json"
     calls = 0
     chars = 0
     errors = 0
     if state_file.is_file():
         try:
-            with state_file.open("r", encoding="utf-8") as f:
-                sd = json.load(f)
+            with state_file.open("r", encoding="utf-8") as file_handle:
+                sd = json.load(file_handle)
                 calls = sd.get("calls_count", 0)
                 chars = sd.get("total_response_chars", 0)
                 errors = sd.get("errors_count", 0)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Token stats read error for %s: %s", order_id, exc)
 
-    # Оценка затрат: 1 токен ~ 3.5 символов, $3.00 / 1M токенов, курс ~95 ₽
     tokens = int(chars / 3.5)
     cost_usd = (tokens / 1_000_000) * 3.00
     cost_rub = cost_usd * 95.0
@@ -115,13 +155,10 @@ def git_cmd(cwd: Path, *args: str) -> subprocess.CompletedProcess:
         capture_output=True,
         text=True,
         encoding="utf-8",
-        errors="replace"
+        errors="replace",
     )
 
 
-# --------------------------------------------------------------------------- #
-# Команда: new
-# --------------------------------------------------------------------------- #
 def cmd_new(args: argparse.Namespace) -> int:
     orders_dir = get_orders_dir(args.orders_dir)
     orders_dir.mkdir(parents=True, exist_ok=True)
@@ -145,18 +182,13 @@ def cmd_new(args: argparse.Namespace) -> int:
     (order_dir / "src").mkdir(exist_ok=True)
     (order_dir / "delivery").mkdir(exist_ok=True)
 
-    # 1. Настройка Roo Code и MCP
     roo_dir = order_dir / ".roo"
     roo_dir.mkdir(exist_ok=True)
 
     mcp_profile = kind if kind in ("vpf", "report", "ext", "intake") else "ext"
-    mcp_src = MCP_CONFIGS_DIR / f"mcp.{mcp_profile}.json"
-    if mcp_src.is_file():
-        shutil.copy2(mcp_src, roo_dir / "mcp.json")
-    else:
-        (roo_dir / "mcp.json").write_text('{\n  "mcpServers": {}\n}\n', encoding="utf-8")
+    mcp_cfg = build_mcp_config(mcp_profile, order_slug, "127.0.0.1", 8766)
+    (roo_dir / "mcp.json").write_text(json.dumps(mcp_cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    # Копирование .roomodes и rules
     roomodes_src = ROOT_DIR / ".roomodes"
     if roomodes_src.is_file():
         shutil.copy2(roomodes_src, order_dir / ".roomodes")
@@ -168,7 +200,6 @@ def cmd_new(args: argparse.Namespace) -> int:
             shutil.rmtree(dst_rules)
         shutil.copytree(rules_src_dir, dst_rules)
 
-    # 2. Создание order.json
     now_iso = datetime.datetime.now().isoformat()
     now_str = datetime.date.today().isoformat()
     deadline_str = ""
@@ -195,16 +226,15 @@ def cmd_new(args: argparse.Namespace) -> int:
         "config_info": {
             "name": args.config or "Типовая 1С",
             "version": "",
-            "platform": args.platform or "8.3.24"
+            "platform": args.platform or "8.3.24",
         },
         "tags": [kind],
         "history": [
             {"ts": now_iso, "event": "created", "note": "Инициализация заказа в системе"}
-        ]
+        ],
     }
     save_order_json(order_dir, order_data)
 
-    # 3. Создание brief.md
     brief_tmpl = TEMPLATES_DIR / "brief.md"
     if brief_tmpl.is_file():
         brief_text = brief_tmpl.read_text(encoding="utf-8")
@@ -217,7 +247,6 @@ def cmd_new(args: argparse.Namespace) -> int:
         brief_text = brief_text.replace("{{kwork_url}}", args.url or "https://kwork.ru")
         (order_dir / "brief.md").write_text(brief_text, encoding="utf-8")
 
-    # 4. Создание DECISIONS.md (Журнал решений)
     dec_tmpl = TEMPLATES_DIR / "DECISIONS.md"
     if dec_tmpl.is_file():
         dec_text = dec_tmpl.read_text(encoding="utf-8")
@@ -229,7 +258,6 @@ def cmd_new(args: argparse.Namespace) -> int:
         dec_text = dec_text.replace("{{objective}}", args.title or order_slug)
         (order_dir / "DECISIONS.md").write_text(dec_text, encoding="utf-8")
 
-    # 5. Инициализация Git-репозитория заказа
     git_cmd(order_dir, "init")
     git_cmd(order_dir, "config", "user.name", "kwork-guard")
     git_cmd(order_dir, "config", "user.email", "guard@kwork.local")
@@ -237,7 +265,6 @@ def cmd_new(args: argparse.Namespace) -> int:
     git_cmd(order_dir, "add", ".")
     git_cmd(order_dir, "commit", "-m", f"chore: initial commit for order {order_slug}")
 
-    # 6. Регенерация дашборда
     sync_dashboard(orders_dir)
 
     print("\n" + "=" * 65)
@@ -249,13 +276,10 @@ def cmd_new(args: argparse.Namespace) -> int:
     print(f"  Git:       Инициализирован репозиторий с initial commit")
     print("=" * 65)
     print(f"\nКоманда для старта в VS Code:")
-    print(f"  code \"{order_dir}\"\n")
+    print(f'  code "{order_dir}"\n')
     return 0
 
 
-# --------------------------------------------------------------------------- #
-# Команда: update
-# --------------------------------------------------------------------------- #
 def cmd_update(args: argparse.Namespace) -> int:
     orders_dir = get_orders_dir(args.orders_dir)
     order_dir = orders_dir / args.slug
@@ -292,11 +316,10 @@ def cmd_update(args: argparse.Namespace) -> int:
     data.setdefault("history", []).append({
         "ts": datetime.datetime.now().isoformat(),
         "event": "update",
-        "note": note
+        "note": note,
     })
     save_order_json(order_dir, data)
 
-    # Git commit
     git_cmd(order_dir, "add", "order.json")
     git_cmd(order_dir, "commit", "-m", f"chore(order): {note}")
 
@@ -305,9 +328,6 @@ def cmd_update(args: argparse.Namespace) -> int:
     return 0
 
 
-# --------------------------------------------------------------------------- #
-# Команда: deliver
-# --------------------------------------------------------------------------- #
 def cmd_deliver(args: argparse.Namespace) -> int:
     orders_dir = get_orders_dir(args.orders_dir)
     order_dir = orders_dir / args.slug
@@ -322,11 +342,10 @@ def cmd_deliver(args: argparse.Namespace) -> int:
     data.setdefault("history", []).append({
         "ts": datetime.datetime.now().isoformat(),
         "event": "delivered",
-        "note": "Сдача заказа клиенту"
+        "note": "Сдача заказа клиенту",
     })
     save_order_json(order_dir, data)
 
-    # Git tag
     tag_name = f"delivered-{today_str}"
     git_cmd(order_dir, "config", "user.name", "kwork-guard")
     git_cmd(order_dir, "config", "user.email", "guard@kwork.local")
@@ -340,9 +359,6 @@ def cmd_deliver(args: argparse.Namespace) -> int:
     return 0
 
 
-# --------------------------------------------------------------------------- #
-# Команда: warranty (Гарантийный контур через месяц)
-# --------------------------------------------------------------------------- #
 def cmd_warranty(args: argparse.Namespace) -> int:
     orders_dir = get_orders_dir(args.orders_dir)
     order_dir = orders_dir / args.slug
@@ -359,14 +375,12 @@ def cmd_warranty(args: argparse.Namespace) -> int:
     data.setdefault("history", []).append({
         "ts": datetime.datetime.now().isoformat(),
         "event": "warranty",
-        "note": issue_text
+        "note": issue_text,
     })
     save_order_json(order_dir, data)
 
-    # Git ветка под гарантию
     git_cmd(order_dir, "checkout", "-b", branch_name)
 
-    # Добавление в DECISIONS.md
     dec_file = order_dir / "DECISIONS.md"
     if dec_file.is_file():
         content = dec_file.read_text(encoding="utf-8")
@@ -394,13 +408,10 @@ def cmd_warranty(args: argparse.Namespace) -> int:
     print(f"   Журнал ADR:   {dec_file}")
     print("=" * 65)
     print(f"\nОткройте заказ в VS Code для исправления:")
-    print(f"  code \"{order_dir}\"\n")
+    print(f'  code "{order_dir}"\n')
     return 0
 
 
-# --------------------------------------------------------------------------- #
-# Синхронизация дашборда CLIENTS.md и вывод list
-# --------------------------------------------------------------------------- #
 def collect_all_orders(orders_dir: Path) -> list[dict[str, Any]]:
     orders = []
     if not orders_dir.is_dir():
@@ -433,12 +444,10 @@ def sync_dashboard(orders_dir: Path) -> str:
     total_token_cost_rub = sum(o["_stats"]["cost_rub"] for o in orders)
     total_hours = sum(o.get("hours_spent", 0.0) for o in orders)
 
-    # Проверка алертов
     alerts = []
     for o in orders:
         oid = o["order_id"]
         status = o.get("status", "")
-        # 1. Дедлайн ближе 48 часов (только для заказов В РАБОТЕ или на ГАРАНТИИ)
         dl_str = o.get("deadline", "")
         if dl_str and status in ("in_progress", "warranty"):
             try:
@@ -448,10 +457,9 @@ def sync_dashboard(orders_dir: Path) -> str:
                     alerts.append(f"⏰ **ПРОСРОЧЕН ДЕДЛАЙН ({delta} дн):** `{oid}` ({o.get('client_name')}) — дедлайн был {dl_str}")
                 elif delta <= 2:
                     alerts.append(f"⏰ **СКОРО ДЕДЛАЙН ({delta} дн):** `{oid}` ({o.get('client_name')}) — дедлайн {dl_str}")
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Deadline parse error for %s: %s", oid, exc)
 
-        # 2. Перерасход бюджета токенов
         if o["_stats"]["calls"] >= 20:
             alerts.append(f"⚠️ **ВЫСОКИЙ РАСХОД ТОКЕНОВ:** `{oid}` — {o['_stats']['calls']}/25 вызовов (${o['_stats']['cost_usd']})")
 
@@ -540,16 +548,12 @@ def cmd_list(args: argparse.Namespace) -> int:
     return 0
 
 
-# --------------------------------------------------------------------------- #
-# Main CLI Router
-# --------------------------------------------------------------------------- #
 def main() -> int:
     parser = argparse.ArgumentParser(description="Менеджер заказов kwork-guard")
     parser.add_argument("--orders-dir", help="Каталог заказов (по умолчанию C:\\Orders)")
 
     subparsers = parser.add_subparsers(dest="subcommand", required=True)
 
-    # new
     p_new = subparsers.add_parser("new", help="Создать новый заказ")
     p_new.add_argument("kind", help="Тип: vpf | report | processor | ext | intake | project")
     p_new.add_argument("slug", help="Идентификатор папки заказа (например komplekto_vpf)")
@@ -563,11 +567,9 @@ def main() -> int:
     p_new.add_argument("--platform", help="Версия платформы 1С (например 8.3.24)")
     p_new.add_argument("--url", help="Ссылка на трек Kwork")
 
-    # list
     p_list = subparsers.add_parser("list", help="Список заказов и дашборд")
     p_list.add_argument("--status", choices=list(VALID_STATUSES), help="Фильтр по статусу")
 
-    # update
     p_upd = subparsers.add_parser("update", help="Обновить статус, цену или часы заказа")
     p_upd.add_argument("slug", help="Идентификатор заказа")
     p_upd.add_argument("--status", choices=list(VALID_STATUSES), help="Новый статус")
@@ -576,16 +578,13 @@ def main() -> int:
     p_upd.add_argument("--deadline", help="Новый дедлайн (YYYY-MM-DD)")
     p_upd.add_argument("--note", help="Текст заметки в историю")
 
-    # deliver
     p_del = subparsers.add_parser("deliver", help="Сдать заказ (статус delivered + Git-тег)")
     p_del.add_argument("slug", help="Идентификатор заказа")
 
-    # warranty
     p_war = subparsers.add_parser("warranty", help="Открыть гарантийную ветку и зафиксировать инцидент")
     p_war.add_argument("slug", help="Идентификатор заказа")
     p_war.add_argument("--issue", help="Описание проблемы или запроса клиента")
 
-    # sync
     subparsers.add_parser("sync", help="Принудительно обновить CLIENTS.md")
 
     args = parser.parse_args()
@@ -596,7 +595,7 @@ def main() -> int:
         "update": cmd_update,
         "deliver": cmd_deliver,
         "warranty": cmd_warranty,
-        "sync": lambda a: (sync_dashboard(get_orders_dir(a.orders_dir)), print(f"[✓] CLIENTS.md обновлен."))[1] or 0,
+        "sync": lambda a: (sync_dashboard(get_orders_dir(a.orders_dir)), print("[✓] CLIENTS.md обновлен."))[1] or 0,
     }
 
     return commands[args.subcommand](args)
