@@ -63,15 +63,25 @@ class ReadCache:
         cleaned = re.sub(r"[^A-Za-z0-9_-]", "_", name.strip())
         return cleaned if cleaned else "common"
 
-    def _cache_file(self, project_name: str) -> Path:
+    def _cache_file(self, project_name: str, order_dir: Optional[Path] = None) -> Path:
         safe_name = self._sanitize_name(project_name)
+        if order_dir is not None and order_dir.is_dir():
+            per_order_dir = order_dir / ".guard_cache"
+            per_order_dir.mkdir(parents=True, exist_ok=True)
+            return per_order_dir / f"{safe_name}.json"
         return self.cache_dir / f"{safe_name}.json"
 
-    def _load_project_cache(self, project_name: str) -> None:
-        if project_name in self._store:
+    def _cache_bucket(self, project_name: str, order_dir: Optional[Path] = None) -> str:
+        if order_dir is not None and order_dir.is_dir():
+            return f"{order_dir.resolve()}::{project_name}"
+        return project_name
+
+    def _load_project_cache(self, project_name: str, order_dir: Optional[Path] = None) -> None:
+        bucket = self._cache_bucket(project_name, order_dir)
+        if bucket in self._store:
             return
-        self._store[project_name] = {}
-        target_file = self._cache_file(project_name)
+        self._store[bucket] = {}
+        target_file = self._cache_file(project_name, order_dir)
         if not target_file.is_file():
             return
         try:
@@ -81,32 +91,40 @@ class ReadCache:
             if isinstance(raw_data, dict):
                 for key, item in raw_data.items():
                     if isinstance(item, dict) and (now - item.get("ts", 0)) <= self.ttl_sec:
-                        self._store[project_name][key] = item
+                        self._store[bucket][key] = item
         except Exception as exc:
-            logger.warning("Cache load failure for %s (%s), resetting.", project_name, exc)
-            self._store[project_name] = {}
+            logger.warning("Cache load failure for %s (%s), resetting.", bucket, exc)
+            self._store[bucket] = {}
 
-    def _save_project_cache(self, project_name: str) -> None:
+    def _save_project_cache(self, project_name: str, order_dir: Optional[Path] = None) -> None:
         if not self.enabled:
             return
-        target_file = self._cache_file(project_name)
+        bucket = self._cache_bucket(project_name, order_dir)
+        target_file = self._cache_file(project_name, order_dir)
         try:
-            data = self._store.get(project_name, {})
+            data = self._store.get(bucket, {})
             atomic_write_json(target_file, data, indent=None)
         except Exception as exc:
-            logger.error("Cache save failure for %s: %s", project_name, exc)
+            logger.error("Cache save failure for %s: %s", bucket, exc)
 
     @staticmethod
     def _make_key(tool_name: str, args: dict[str, Any]) -> str:
         serialized = json.dumps(args, sort_keys=True, ensure_ascii=False)
         return hashlib.md5(f"{tool_name}:{serialized}".encode("utf-8")).hexdigest()
 
-    def get(self, project_name: str, tool_name: str, args: dict[str, Any]) -> Optional[dict[str, Any]]:
+    def get(
+        self,
+        project_name: str,
+        tool_name: str,
+        args: dict[str, Any],
+        order_dir: Optional[Path] = None,
+    ) -> Optional[dict[str, Any]]:
         if not self.enabled or not is_cacheable_read(tool_name):
             return None
+        bucket = self._cache_bucket(project_name, order_dir)
         with self._lock:
-            self._load_project_cache(project_name)
-            project_store = self._store.get(project_name)
+            self._load_project_cache(project_name, order_dir)
+            project_store = self._store.get(bucket)
             if not project_store:
                 return None
             key = self._make_key(tool_name, args)
@@ -115,37 +133,51 @@ class ReadCache:
                 return None
             if time.time() - entry.get("ts", 0) > self.ttl_sec:
                 project_store.pop(key, None)
-                self._save_project_cache(project_name)
+                self._save_project_cache(project_name, order_dir)
                 return None
             data = entry.get("result")
             return json.loads(json.dumps(data)) if data is not None else None
 
-    def put(self, project_name: str, tool_name: str, args: dict[str, Any], result: dict[str, Any]) -> None:
+    def put(
+        self,
+        project_name: str,
+        tool_name: str,
+        args: dict[str, Any],
+        result: dict[str, Any],
+        order_dir: Optional[Path] = None,
+    ) -> None:
         if not self.enabled or not is_cacheable_read(tool_name):
             return
         if result.get("isError"):
             return
+        bucket = self._cache_bucket(project_name, order_dir)
         with self._lock:
-            self._load_project_cache(project_name)
-            if project_name not in self._store:
-                self._store[project_name] = {}
+            self._load_project_cache(project_name, order_dir)
+            if bucket not in self._store:
+                self._store[bucket] = {}
             key = self._make_key(tool_name, args)
-            self._store[project_name][key] = {
+            self._store[bucket][key] = {
                 "result": json.loads(json.dumps(result)),
                 "ts": time.time(),
                 "tool": tool_name,
                 "args": json.dumps(args, ensure_ascii=False),
             }
-            self._save_project_cache(project_name)
+            self._save_project_cache(project_name, order_dir)
 
-    def invalidate_object(self, project_name: str, object_hint: Optional[str] = None) -> int:
+    def invalidate_object(
+        self,
+        project_name: str,
+        object_hint: Optional[str] = None,
+        order_dir: Optional[Path] = None,
+    ) -> int:
+        bucket = self._cache_bucket(project_name, order_dir)
         with self._lock:
-            self._load_project_cache(project_name)
-            project_store = self._store.get(project_name, {})
+            self._load_project_cache(project_name, order_dir)
+            project_store = self._store.get(bucket, {})
             if not object_hint:
                 removed_count = len(project_store)
-                self._store[project_name] = {}
-                target_file = self._cache_file(project_name)
+                self._store[bucket] = {}
+                target_file = self._cache_file(project_name, order_dir)
                 if target_file.is_file():
                     try:
                         target_file.unlink()
@@ -167,7 +199,7 @@ class ReadCache:
                 project_store.pop(key, None)
 
             if keys_to_remove:
-                self._save_project_cache(project_name)
+                self._save_project_cache(project_name, order_dir)
             return len(keys_to_remove)
 
     def invalidate_project(self, project_name: str) -> int:

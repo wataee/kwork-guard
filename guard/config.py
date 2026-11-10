@@ -71,6 +71,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "edt_url": "http://127.0.0.1:8765/mcp",
         "timeout_sec": 600,
     },
+    "kwork": {
+        "base_url": "https://kwork.ru",
+        "session_file": "state/kwork_session.json",
+        "auto_sync_on_startup": True,
+        "sync_interval_sec": 300,
+        "chat_retention_days": 7,
+        "username": "",
+    },
 }
 
 

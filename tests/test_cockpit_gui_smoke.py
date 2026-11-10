@@ -48,9 +48,11 @@ def test_cockpit_app_lifecycle_and_views(tmp_path: Path) -> None:
     try:
         app.update_idletasks()
 
-        for view_name in ["today", "orders", "new_order", "finance", "tools", "settings"]:
-            app.show_view(view_name)
+        for view_name in ["today", "orders", "chats", "new_order", "finance", "tools", "settings"]:
+            app.nav_buttons[view_name].invoke()
             app.update_idletasks()
+            expected_outer = getattr(app.views[view_name], "_parent_frame", app.views[view_name])
+            assert app.content_container.winfo_children()[-1] == expected_outer
 
         app.show_view("order_detail", order_id=order.order_id)
         app.update_idletasks()

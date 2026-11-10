@@ -8,6 +8,20 @@ import subprocess
 from typing import Any
 import customtkinter
 
+from cockpit.ui.theme import (
+    BG_ELEVATED,
+    BG_MAIN,
+    BG_SURFACE,
+    BORDER,
+    TEXT_PRIMARY,
+    TEXT_SECONDARY,
+    create_button,
+    create_card,
+    create_entry,
+    create_textbox,
+    font_mono,
+    font_ui,
+)
 from guard.library import verify_library
 from tools.weekly_lessons import DEFAULT_EVENTS_PATH, generate_report
 
@@ -30,65 +44,63 @@ class ViewTools(customtkinter.CTkFrame):
         self.grid_columnconfigure(0, weight=1)
 
         self.top_frame = customtkinter.CTkFrame(self, fg_color="transparent")
-        self.top_frame.grid(row=0, column=0, sticky="ew", padx=20, pady=(15, 8))
+        self.top_frame.grid(row=0, column=0, sticky="ew", padx=20, pady=(14, 8))
         self.top_frame.grid_columnconfigure(0, weight=1)
 
         self.title_label = customtkinter.CTkLabel(
             self.top_frame,
-            text="🧰 Инструменты автоматизации и База сниппетов",
-            font=customtkinter.CTkFont(size=22, weight="bold"),
+            text="Инструменты автоматизации и База сниппетов",
+            font=font_ui(20, "bold"),
+            text_color=TEXT_PRIMARY,
         )
         self.title_label.grid(row=0, column=0, sticky="w")
 
-        self.actions_bar = customtkinter.CTkFrame(self, fg_color="#1E293B", corner_radius=8)
+        self.actions_bar = create_card(self, fg_color=BG_SURFACE, corner_radius=8)
         self.actions_bar.grid(row=1, column=0, sticky="ew", padx=20, pady=8)
 
-        self.btn_verify_lib = customtkinter.CTkButton(
+        self.btn_verify_lib = create_button(
             self.actions_bar,
-            text="🔍 Проверить базу сниппетов",
-            fg_color="#0D9488",
-            hover_color="#0F766E",
+            text="Проверить базу сниппетов",
+            variant="success",
             command=self.on_verify_library,
         )
-        self.btn_verify_lib.pack(side="left", padx=10, pady=10)
+        self.btn_verify_lib.pack(side="left", padx=(12, 6), pady=10)
 
-        self.btn_gen_lessons = customtkinter.CTkButton(
+        self.btn_gen_lessons = create_button(
             self.actions_bar,
-            text="📅 Сформировать еженедельный отчет",
-            fg_color="#334155",
-            hover_color="#475569",
+            text="Еженедельный отчет",
+            variant="secondary",
             command=self.on_generate_lessons,
         )
         self.btn_gen_lessons.pack(side="left", padx=6, pady=10)
 
-        self.btn_run_tests = customtkinter.CTkButton(
+        self.btn_run_tests = create_button(
             self.actions_bar,
-            text="🧪 Запустить pytest (Zero-Trust)",
-            fg_color="#2563EB",
-            hover_color="#1D4ED8",
+            text="Запустить pytest (Zero-Trust)",
+            variant="primary",
             command=self.on_run_pytest,
         )
         self.btn_run_tests.pack(side="left", padx=6, pady=10)
 
         self.main_split = customtkinter.CTkFrame(self, fg_color="transparent")
-        self.main_split.grid(row=2, column=0, sticky="nsew", padx=20, pady=(0, 15))
+        self.main_split.grid(row=2, column=0, sticky="nsew", padx=20, pady=(0, 14))
         self.main_split.grid_columnconfigure(0, weight=1)
         self.main_split.grid_columnconfigure(1, weight=2)
         self.main_split.grid_rowconfigure(0, weight=1)
 
-        self.left_col = customtkinter.CTkFrame(self.main_split, fg_color="#1E293B", corner_radius=8)
+        self.left_col = create_card(self.main_split, fg_color=BG_SURFACE, corner_radius=8)
         self.left_col.grid(row=0, column=0, sticky="nsew", padx=(0, 8), pady=0)
         self.left_col.grid_rowconfigure(2, weight=1)
         self.left_col.grid_columnconfigure(0, weight=1)
 
-        lbl_snippets = customtkinter.CTkLabel(
+        customtkinter.CTkLabel(
             self.left_col,
             text="Золотой фонд 1С (сниппеты):",
-            font=customtkinter.CTkFont(size=14, weight="bold"),
-        )
-        lbl_snippets.grid(row=0, column=0, sticky="w", padx=12, pady=(10, 4))
+            font=font_ui(13, "bold"),
+            text_color=TEXT_PRIMARY,
+        ).grid(row=0, column=0, sticky="w", padx=12, pady=(12, 4))
 
-        self.search_snip = customtkinter.CTkEntry(self.left_col, placeholder_text="Поиск сниппета...")
+        self.search_snip = create_entry(self.left_col, placeholder_text="Поиск сниппета...")
         self.search_snip.grid(row=1, column=0, sticky="ew", padx=12, pady=4)
         self.search_snip.bind("<KeyRelease>", lambda e: self.filter_snippets())
 
@@ -96,35 +108,34 @@ class ViewTools(customtkinter.CTkFrame):
         self.snippets_list.grid(row=2, column=0, sticky="nsew", padx=8, pady=(4, 10))
         self.snippets_list.grid_columnconfigure(0, weight=1)
 
-        self.right_col = customtkinter.CTkFrame(self.main_split, fg_color="#1E293B", corner_radius=8)
+        self.right_col = create_card(self.main_split, fg_color=BG_SURFACE, corner_radius=8)
         self.right_col.grid(row=0, column=1, sticky="nsew", padx=(8, 0), pady=0)
         self.right_col.grid_rowconfigure(1, weight=1)
         self.right_col.grid_columnconfigure(0, weight=1)
 
         preview_header = customtkinter.CTkFrame(self.right_col, fg_color="transparent")
-        preview_header.grid(row=0, column=0, sticky="ew", padx=12, pady=(10, 4))
+        preview_header.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 4))
         preview_header.grid_columnconfigure(0, weight=1)
-        preview_header.grid_columnconfigure(1, weight=0)
 
         self.preview_title = customtkinter.CTkLabel(
             preview_header,
             text="Просмотр содержимого:",
-            font=customtkinter.CTkFont(size=14, weight="bold"),
+            font=font_ui(13, "bold"),
+            text_color=TEXT_PRIMARY,
         )
         self.preview_title.grid(row=0, column=0, sticky="w")
 
-        self.btn_copy_snip = customtkinter.CTkButton(
+        self.btn_copy_snip = create_button(
             preview_header,
-            text="📋 Скопировать код",
+            text="Скопировать код",
+            variant="secondary",
             width=130,
+            height=28,
             command=self.on_copy_selected_snippet,
         )
         self.btn_copy_snip.grid(row=0, column=1, sticky="e")
 
-        self.preview_box = customtkinter.CTkTextbox(
-            self.right_col,
-            font=customtkinter.CTkFont(family="Consolas", size=12),
-        )
+        self.preview_box = create_textbox(self.right_col, mono=True)
         self.preview_box.grid(row=1, column=0, sticky="nsew", padx=12, pady=(4, 12))
 
         self._snippets_data: list[dict[str, Any]] = []
@@ -142,7 +153,6 @@ class ViewTools(customtkinter.CTkFrame):
                     self._snippets_data = raw["snippets"]
             except Exception as error:
                 LOGGER.error("Failed to read library/index.json: %s", error)
-
         self.filter_snippets()
 
     def filter_snippets(self) -> None:
@@ -156,18 +166,20 @@ class ViewTools(customtkinter.CTkFrame):
         ]
 
         if not matched:
-            customtkinter.CTkLabel(self.snippets_list, text="Сниппеты не найдены", text_color="#94A3B8").grid(row=0, column=0, pady=10)
+            customtkinter.CTkLabel(self.snippets_list, text="Сниппеты не найдены", text_color=TEXT_SECONDARY, font=font_ui(12)).grid(
+                row=0, column=0, pady=10
+            )
             return
 
         for idx, item in enumerate(matched):
             snip_id = item.get("id", f"snippet_{idx}")
             title = item.get("title", snip_id)
-            btn = customtkinter.CTkButton(
+            btn = create_button(
                 self.snippets_list,
                 text=title,
+                variant="secondary",
                 anchor="w",
-                fg_color="#334155",
-                hover_color="#475569",
+                height=32,
                 command=lambda snip=item: self.select_snippet(snip),
             )
             btn.grid(row=idx, column=0, sticky="ew", pady=2)

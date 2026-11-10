@@ -66,6 +66,7 @@ class OrderSummary:
     net_margin_rub: float = 0.0
     is_api_over_threshold: bool = False
     economy_mode: bool = False
+    deadline_timestamp: int = 0
 
     @property
     def client(self) -> str:
@@ -104,6 +105,7 @@ class OrderDetail:
     path: Path
     checklist: dict[str, bool] = field(default_factory=dict)
     notes: str = ""
+    deadline_timestamp: int = 0
 
     @property
     def client(self) -> str:
@@ -187,6 +189,7 @@ class BudgetStatus:
     net_margin_rub: float = 0.0
     is_api_over_threshold: bool = False
     economy_mode: bool = False
+    deadline_timestamp: int = 0
 
     @property
     def call_count(self) -> int:
@@ -322,7 +325,7 @@ class OrdersFacade:
         normalized_query = search_query.strip().lower() if search_query else None
 
         for item in sorted(self.orders_dir.iterdir()):
-            if item.is_dir() and not item.name.startswith("."):
+            if item.is_dir() and not item.name.startswith((".", "_")):
                 data = load_order_json(item)
                 if not data:
                     continue
@@ -376,6 +379,7 @@ class OrdersFacade:
                         net_margin_rub=net_margin,
                         is_api_over_threshold=over_thresh,
                         economy_mode=bool(stats.get("economy_mode", False) or over_thresh),
+                        deadline_timestamp=int(data.get("deadline_timestamp") or 0),
                     )
                 )
 
@@ -416,6 +420,7 @@ class OrdersFacade:
             path=target_dir,
             checklist=checklist,
             notes=data.get("notes", ""),
+            deadline_timestamp=int(data.get("deadline_timestamp") or 0),
         )
 
     def create_order(
@@ -633,6 +638,13 @@ class OrdersFacade:
             elif key == "deadline" and value is not None:
                 data["deadline"] = str(value)
                 changed.append(f"deadline -> {value}")
+            elif key == "deadline_timestamp" and value is not None:
+                data["deadline_timestamp"] = int(value)
+                changed.append(f"deadline_ts -> {value}")
+            elif key == "kind" and value is not None:
+                data["kind"] = str(value)
+                data["_manual_override"] = True
+                changed.append(f"kind -> {value}")
             elif key == "title" and value is not None:
                 data["title"] = str(value)
                 changed.append(f"title -> {value}")
@@ -641,6 +653,7 @@ class OrdersFacade:
                 changed.append("notes updated")
             elif key in ("configuration", "config_name") and value is not None:
                 data.setdefault("config_info", {})["name"] = str(value)
+                data["_manual_override"] = True
                 changed.append(f"configuration -> {value}")
 
         note = fields.get("note") or ", ".join(changed) or "Обновление параметров"

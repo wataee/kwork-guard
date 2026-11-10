@@ -8,6 +8,7 @@ from guard.platform_context import PlatformContextService
 import datetime
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -592,4 +593,69 @@ def macro_compact_schema(a: dict) -> dict:
     compacted = compact_metadata_schema(raw)
     summary = format_schema_summary(compacted)
     return tool_result(summary)
+
+
+def macro_get_order_context(a: dict) -> dict:
+    raw_dir = str(a.get("order_dir") or os.getenv("KWORK_ORDER_DIR", "") or "").strip()
+    order_dir = Path(raw_dir) if raw_dir else None
+
+    if order_dir is None or not order_dir.is_dir():
+        ws_file = Path(__file__).resolve().parent.parent / "state" / "active_workspace.json"
+        if ws_file.is_file():
+            try:
+                ws_data = json.loads(ws_file.read_text(encoding="utf-8"))
+                oid = str(a.get("order_id") or "").strip()
+                mapped = (ws_data.get("orders") or {}).get(oid) if oid else ws_data.get("active_order_dir")
+                if mapped and Path(str(mapped)).is_dir():
+                    order_dir = Path(str(mapped))
+            except Exception as exc:
+                logger.debug("Workspace fallback read warning: %s", exc)
+
+    if order_dir is None or not order_dir.is_dir():
+        return tool_result(
+            "get_order_context: папка активного заказа не определена. Передай order_dir или задай KWORK_ORDER_DIR.",
+            True,
+        )
+
+    context_file = order_dir / "ORDER_CONTEXT.md"
+    context_text = context_file.read_text(encoding="utf-8", errors="replace") if context_file.is_file() else ""
+    if not context_text:
+        order_file = order_dir / "order.json"
+        brief_file = order_dir / "brief.md"
+        parts = []
+        if order_file.is_file():
+            parts.append(order_file.read_text(encoding="utf-8", errors="replace"))
+        if brief_file.is_file():
+            parts.append(brief_file.read_text(encoding="utf-8", errors="replace"))
+        context_text = "\n\n".join(parts)
+
+    manifest_data: dict[str, Any] = {}
+    manifest_file = order_dir / "attachments_manifest.json"
+    if manifest_file.is_file():
+        try:
+            manifest_data = json.loads(manifest_file.read_text(encoding="utf-8"))
+        except Exception as exc:
+            logger.debug("Manifest parse warning in get_order_context: %s", exc)
+
+    grouped_files: dict[str, list[str]] = {"screenshots": [], "1c_files": [], "documents": []}
+    att_root = order_dir / "attachments"
+    if att_root.is_dir():
+        for cat in ("screenshots", "1c_files", "documents"):
+            sub = att_root / cat
+            if sub.is_dir():
+                grouped_files[cat] = [f"attachments/{cat}/{p.name}" for p in sorted(sub.iterdir()) if p.is_file()]
+
+    payload = {
+        "order_dir": str(order_dir),
+        "task_type": os.getenv("KWORK_TASK_TYPE", ""),
+        "attachments": grouped_files,
+        "manifest_files_count": len(manifest_data.get("files") or []),
+    }
+    response_text = (
+        f"{context_text.strip()}\n\n"
+        f"## Метаданные вложений (JSON)\n"
+        f"```json\n{json.dumps(payload, ensure_ascii=False, indent=2)}\n```"
+    )
+    return tool_result(response_text)
+
 

@@ -36,6 +36,8 @@ TARGET_FILES = [
     "tests/test_dual_backend.py",
     "tests/test_optimization_v21.py",
     "tests/test_cockpit_v21.py",
+    "tests/test_kwork_sync_and_chats.py",
+    "tests/test_workspace_bridge.py",
 ]
 
 

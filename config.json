@@ -1,5 +1,5 @@
 {
-  "active_provider": "antigravity",
+  "active_provider": "openrouter",
   "providers": {
     "openrouter": {
       "base_url": "https://openrouter.ai/api/v1",
@@ -9,15 +9,27 @@
       "base_url": "http://127.0.0.1:3000/v1",
       "api_key_env": "ANTIGRAVITY_API_KEY",
       "fallback_to_openrouter": false,
-      "fallback_ports": [3000, 3001]
+      "fallback_ports": [
+        3000,
+        3001
+      ]
     }
   },
   "model_routing": {
     "fast_tasks": "google/gemini-2.5-flash",
     "coding_tasks": "anthropic/claude-3-7-sonnet",
     "economy_mode_model": "google/gemini-2.5-flash",
-    "fast_task_types": ["compress", "intake", "summary"],
-    "coding_task_types": ["bsl", "skd", "dcs", "edt_mcp"]
+    "fast_task_types": [
+      "compress",
+      "intake",
+      "summary"
+    ],
+    "coding_task_types": [
+      "bsl",
+      "skd",
+      "dcs",
+      "edt_mcp"
+    ]
   },
   "limits": {
     "max_calls_per_order": 25,
@@ -51,5 +63,13 @@
   "upstream": {
     "edt_url": "http://127.0.0.1:8765/mcp",
     "timeout_sec": 600
+  },
+  "kwork": {
+    "base_url": "https://kwork.ru",
+    "session_file": "state/kwork_session.json",
+    "auto_sync_on_startup": true,
+    "sync_interval_sec": 300,
+    "chat_retention_days": 7,
+    "username": ""
   }
 }

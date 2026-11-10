@@ -44,6 +44,7 @@ from guard.macros import (
     macro_bsl_lint_module,
     macro_get_ai_rules,
     macro_compact_schema,
+    macro_get_order_context,
 )
 
 _LOGS_DIR = Path(__file__).resolve().parent / "logs"
@@ -72,6 +73,11 @@ CACHE = ReadCache(
 
 EDT_URL = os.getenv("EDT_MCP_URL", "http://127.0.0.1:8765/mcp")
 EDT_TOKEN = os.getenv("EDT_MCP_TOKEN", "")
+KWORK_ORDER_DIR = os.getenv("KWORK_ORDER_DIR", "").strip()
+KWORK_TASK_TYPE = os.getenv("KWORK_TASK_TYPE", "").strip()
+if KWORK_ORDER_DIR and Path(KWORK_ORDER_DIR).is_dir():
+    _kdir = Path(KWORK_ORDER_DIR).resolve()
+    ORDER_MGR.register_order_dir(_kdir.name, _kdir, KWORK_TASK_TYPE)
 PORT = int(os.getenv("GUARD_PORT", "8766"))
 MAX_RESULT_CHARS = int(os.getenv("MAX_RESULT_CHARS", "6000"))
 MAX_DESC_CHARS = int(os.getenv("MAX_DESC_CHARS", "300"))
@@ -617,6 +623,17 @@ MACRO_TOOLS: dict[str, dict] = {
             "required": ["metadata"],
         },
     },
+    "get_order_context": {
+        "name": "get_order_context",
+        "description": "Возвращает полный контекст текущего заказа (ORDER_CONTEXT.md), историю сообщений, список скриншотов и файлов вложений.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "order_id": {"type": "string", "description": "ID заказа (опционально)"},
+                "order_dir": {"type": "string", "description": "Путь к папке заказа (опционально)"},
+            },
+        },
+    },
 }
 
 PROFILE_MACROS: dict[str, list[str]] = {
@@ -624,25 +641,25 @@ PROFILE_MACROS: dict[str, list[str]] = {
         "scaffold_vpf", "build_and_check", "library_list", "library_get",
         "bootstrap_gold", "scaffold_processor", "get_critical_errors", "patch_method",
         "read_bsl_method", "complete_order", "bsl_syntax_help", "bsl_lint_module",
-        "get_ai_rules", "compact_schema"
+        "get_ai_rules", "compact_schema", "get_order_context"
     ],
     "report": [
         "scaffold_report", "build_and_check", "library_list", "library_get",
         "bootstrap_gold", "scaffold_processor", "get_critical_errors", "patch_method",
         "read_bsl_method", "complete_order", "bsl_syntax_help", "bsl_lint_module",
-        "get_ai_rules", "compact_schema"
+        "get_ai_rules", "compact_schema", "get_order_context"
     ],
     "ext": [
         "library_list", "library_get",
         "bootstrap_gold", "scaffold_processor", "get_critical_errors", "patch_method",
         "read_bsl_method", "complete_order", "bsl_syntax_help", "bsl_lint_module",
-        "get_ai_rules", "compact_schema"
+        "get_ai_rules", "compact_schema", "get_order_context"
     ],
     "full": [
         "scaffold_vpf", "scaffold_report", "scaffold_processor", "build_and_check",
         "library_list", "library_get", "bootstrap_gold", "get_critical_errors", "patch_method",
         "read_bsl_method", "complete_order", "bsl_syntax_help", "bsl_lint_module",
-        "get_ai_rules", "compact_schema"
+        "get_ai_rules", "compact_schema", "get_order_context"
     ],
 }
 
@@ -989,6 +1006,10 @@ async def wrap_compact_schema(a: dict) -> dict:
     return macro_compact_schema(a)
 
 
+async def wrap_get_order_context(a: dict) -> dict:
+    return macro_get_order_context(a)
+
+
 MACRO_IMPL = {
     "scaffold_vpf": macro_scaffold_vpf,
     "build_and_check": macro_build_and_check,
@@ -1005,6 +1026,7 @@ MACRO_IMPL = {
     "bsl_lint_module": wrap_bsl_lint_module,
     "get_ai_rules": wrap_get_ai_rules,
     "compact_schema": wrap_compact_schema,
+    "get_order_context": wrap_get_order_context,
 }
 
 app = FastAPI(title="edt-guard")
@@ -1064,6 +1086,24 @@ async def admin_extend_order(order_id: str, req: Request, calls: int = 10) -> Re
     if not is_loopback(req):
         return JSONResponse({"error": "Forbidden: Loopback only (127.0.0.1)"}, status_code=403)
     return JSONResponse(await ORDER_MGR.extend_order(order_id, calls))
+
+
+@app.post("/admin/active-workspace")
+async def admin_set_active_workspace(req: Request) -> Response:
+    if not is_loopback(req):
+        return JSONResponse({"error": "Forbidden: Loopback only (127.0.0.1)"}, status_code=403)
+    body = await req.json()
+    oid = str(body.get("order_id") or "").strip() or "default"
+    odir_raw = str(body.get("order_dir") or "").strip()
+    ttype = str(body.get("task_type") or "").strip()
+    if not odir_raw or not Path(odir_raw).is_dir():
+        return JSONResponse({"ok": False, "error": "order_dir not found"}, status_code=400)
+    odir = Path(odir_raw).resolve()
+    ORDER_MGR.register_order_dir(oid, odir, ttype)
+    os.environ["KWORK_ORDER_DIR"] = str(odir)
+    if ttype:
+        os.environ["KWORK_TASK_TYPE"] = ttype
+    return JSONResponse({"ok": True, "order_id": oid, "order_dir": str(odir), "task_type": ttype})
 
 
 @app.get("/admin/provider")
@@ -1202,7 +1242,13 @@ async def handle_call(profile: str, mid: Any, params: dict, req: Request, path_o
     allow = PROFILES[profile]
     guard = GUARDS[profile]
 
-    order_id = ORDER_MGR.resolve_order_id(dict(req.headers), args, path_order_id)
+    req_headers = dict(req.headers)
+    order_id = ORDER_MGR.resolve_order_id(req_headers, args, path_order_id)
+    order_dir = ORDER_MGR.resolve_order_dir(order_id, req_headers)
+    if name == "get_order_context":
+        args.setdefault("order_id", order_id)
+        if order_dir is not None and not args.get("order_dir"):
+            args["order_dir"] = str(order_dir)
     project_name = args.get("projectName") or "common"
 
     def done(result: dict, note: str = "", cache_hit: bool = False, warn: Optional[str] = None) -> JSONResponse:
@@ -1250,7 +1296,7 @@ async def handle_call(profile: str, mid: Any, params: dict, req: Request, path_o
         await ORDER_MGR.record_call(order_id, name, False, 0, blocked_reason="budget_exceeded")
         return done(tool_result(budget_msg or "Бюджет заказа исчерпан.", True), "budget_blocked")
 
-    cached_result = CACHE.get(project_name, name, args)
+    cached_result = CACHE.get(project_name, name, args, order_dir=order_dir)
     if cached_result is not None:
         return done(cached_result, note="cache_hit", cache_hit=True)
 
@@ -1276,7 +1322,7 @@ async def handle_call(profile: str, mid: Any, params: dict, req: Request, path_o
         await ORDER_MGR.record_call(order_id, name, not failed, resp_chars)
         if not failed and is_write_tool(name):
             hint = args.get("objectName") or args.get("name") or args.get("modulePath") or args.get("methodName")
-            CACHE.invalidate_object(project_name, hint)
+            CACHE.invalidate_object(project_name, hint, order_dir=order_dir)
             if name == "patch_method" and args.get("modulePath"):
                 VERIFIED_MODULES.add(str(args.get("modulePath")))
         return done(result, "macro", warn=budget_msg)
@@ -1301,11 +1347,11 @@ async def handle_call(profile: str, mid: Any, params: dict, req: Request, path_o
     if not failed:
         if is_write_tool(name):
             hint = args.get("objectName") or args.get("name") or args.get("modulePath") or args.get("methodName")
-            CACHE.invalidate_object(project_name, hint)
+            CACHE.invalidate_object(project_name, hint, order_dir=order_dir)
             if name in ("write_module_source", "patch_method") and args.get("modulePath"):
                 VERIFIED_MODULES.add(str(args.get("modulePath")))
         elif is_cacheable_read(name):
-            CACHE.put(project_name, name, args, res)
+            CACHE.put(project_name, name, args, res, order_dir=order_dir)
 
     return done(res, warn=budget_msg)
 

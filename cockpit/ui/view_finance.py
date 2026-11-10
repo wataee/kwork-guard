@@ -7,6 +7,23 @@ from pathlib import Path
 from typing import Any
 import customtkinter
 
+from cockpit.ui.theme import (
+    ACCENT_INDIGO_FG,
+    BG_ELEVATED,
+    BG_MAIN,
+    BG_SURFACE,
+    BORDER,
+    DANGER_FG,
+    SUCCESS_FG,
+    TEXT_PRIMARY,
+    TEXT_SECONDARY,
+    WARNING_FG,
+    create_button,
+    create_card,
+    font_mono,
+    font_ui,
+)
+
 LOGGER = logging.getLogger("cockpit.view_finance")
 if not LOGGER.handlers:
     _log_dir = Path(__file__).resolve().parent.parent.parent / "logs"
@@ -26,58 +43,58 @@ class ViewFinance(customtkinter.CTkFrame):
         self.grid_columnconfigure(0, weight=1)
 
         self.top_frame = customtkinter.CTkFrame(self, fg_color="transparent")
-        self.top_frame.grid(row=0, column=0, sticky="ew", padx=20, pady=(15, 8))
+        self.top_frame.grid(row=0, column=0, sticky="ew", padx=20, pady=(14, 8))
         self.top_frame.grid_columnconfigure(0, weight=1)
-        self.top_frame.grid_columnconfigure(1, weight=0)
 
         self.title_label = customtkinter.CTkLabel(
             self.top_frame,
-            text="📊 Финансовая аналитика и чистая маржа",
-            font=customtkinter.CTkFont(size=22, weight="bold"),
+            text="Финансовая аналитика и чистая маржа",
+            font=font_ui(20, "bold"),
+            text_color=TEXT_PRIMARY,
         )
         self.title_label.grid(row=0, column=0, sticky="w")
 
         btn_box = customtkinter.CTkFrame(self.top_frame, fg_color="transparent")
         btn_box.grid(row=0, column=1, sticky="e")
 
-        self.export_btn = customtkinter.CTkButton(
+        self.export_btn = create_button(
             btn_box,
-            text="📥 Экспорт в CSV",
-            fg_color="#0D9488",
-            hover_color="#0F766E",
+            text="Экспорт в CSV",
+            variant="primary",
             command=self.on_export_csv,
         )
         self.export_btn.pack(side="left", padx=4)
 
-        self.refresh_btn = customtkinter.CTkButton(
+        self.refresh_btn = create_button(
             btn_box,
-            text="🔄 Обновить",
-            width=90,
+            text="↻ Обновить",
+            variant="secondary",
+            width=96,
             command=self.load_data,
         )
-        self.refresh_btn.pack(side="left", padx=4)
+        self.refresh_btn.pack(side="left", padx=(4, 0))
 
-        self.kpi_frame = customtkinter.CTkFrame(self, fg_color="#1E293B", corner_radius=8)
+        self.kpi_frame = create_card(self, fg_color=BG_SURFACE, corner_radius=8)
         self.kpi_frame.grid(row=1, column=0, sticky="ew", padx=20, pady=8)
         self.kpi_frame.grid_columnconfigure((0, 1, 2, 3, 4), weight=1)
 
-        self.kpi_revenue = customtkinter.CTkLabel(self.kpi_frame, text="Выручка\n0 ₽", font=customtkinter.CTkFont(size=14, weight="bold"), text_color="#10B981")
-        self.kpi_revenue.grid(row=0, column=0, padx=10, pady=12)
+        self.kpi_revenue = customtkinter.CTkLabel(self.kpi_frame, text="Выручка\n0 ₽", font=font_mono(14, "bold"), text_color=SUCCESS_FG)
+        self.kpi_revenue.grid(row=0, column=0, padx=10, pady=14)
 
-        self.kpi_net_margin = customtkinter.CTkLabel(self.kpi_frame, text="Чистая маржа\n0 ₽", font=customtkinter.CTkFont(size=14, weight="bold"), text_color="#38BDF8")
-        self.kpi_net_margin.grid(row=0, column=1, padx=10, pady=12)
+        self.kpi_net_margin = customtkinter.CTkLabel(self.kpi_frame, text="Чистая маржа\n0 ₽", font=font_mono(14, "bold"), text_color=ACCENT_INDIGO_FG)
+        self.kpi_net_margin.grid(row=0, column=1, padx=10, pady=14)
 
-        self.kpi_ai_cost = customtkinter.CTkLabel(self.kpi_frame, text="Расход AI\n0.00 ₽", font=customtkinter.CTkFont(size=14, weight="bold"), text_color="#EF4444")
-        self.kpi_ai_cost.grid(row=0, column=2, padx=10, pady=12)
+        self.kpi_ai_cost = customtkinter.CTkLabel(self.kpi_frame, text="Расход AI\n0.00 ₽", font=font_mono(14, "bold"), text_color=DANGER_FG)
+        self.kpi_ai_cost.grid(row=0, column=2, padx=10, pady=14)
 
-        self.kpi_margin = customtkinter.CTkLabel(self.kpi_frame, text="Маржа %\n100%", font=customtkinter.CTkFont(size=14, weight="bold"))
-        self.kpi_margin.grid(row=0, column=3, padx=10, pady=12)
+        self.kpi_margin = customtkinter.CTkLabel(self.kpi_frame, text="Маржа %\n100%", font=font_mono(14, "bold"), text_color=TEXT_PRIMARY)
+        self.kpi_margin.grid(row=0, column=3, padx=10, pady=14)
 
-        self.kpi_rate = customtkinter.CTkLabel(self.kpi_frame, text="Ставка ₽/ч\n0 ₽/ч", font=customtkinter.CTkFont(size=14, weight="bold"), text_color="#F59E0B")
-        self.kpi_rate.grid(row=0, column=4, padx=10, pady=12)
+        self.kpi_rate = customtkinter.CTkLabel(self.kpi_frame, text="Ставка ₽/ч\n0 ₽/ч", font=font_mono(14, "bold"), text_color=WARNING_FG)
+        self.kpi_rate.grid(row=0, column=4, padx=10, pady=14)
 
         self.table_scroll = customtkinter.CTkScrollableFrame(self, fg_color="transparent")
-        self.table_scroll.grid(row=2, column=0, sticky="nsew", padx=20, pady=(4, 15))
+        self.table_scroll.grid(row=2, column=0, sticky="nsew", padx=20, pady=(4, 14))
         self.table_scroll.grid_columnconfigure(0, weight=1)
 
         self._cached_orders: list[Any] = []
@@ -88,7 +105,7 @@ class ViewFinance(customtkinter.CTkFrame):
             self.kpi_revenue.configure(text=f"Сдано (выручка)\n{summary.delivered_value:,.0f} ₽".replace(",", " "))
             self.kpi_net_margin.configure(text=f"Чистая маржа\n{summary.total_net_margin_rub:,.0f} ₽".replace(",", " "))
             if summary.total_virtual_cost_rub > 0 and summary.total_real_ai_cost_rub == 0:
-                ai_txt = f"Расход AI\n0.00 ₽ (подписка ~{summary.total_virtual_cost_rub:.1f} ₽)"
+                ai_txt = f"Расход AI\n0.00 ₽ (~{summary.total_virtual_cost_rub:.1f} ₽)"
             else:
                 ai_txt = f"Расход AI\n{summary.total_real_ai_cost_rub:.2f} ₽"
             self.kpi_ai_cost.configure(text=ai_txt)
@@ -106,39 +123,39 @@ class ViewFinance(customtkinter.CTkFrame):
             child.destroy()
 
         if not orders:
-            lbl = customtkinter.CTkLabel(self.table_scroll, text="Нет данных по заказам", text_color="#94A3B8")
+            lbl = customtkinter.CTkLabel(self.table_scroll, text="Нет данных по заказам", text_color=TEXT_SECONDARY, font=font_ui(13))
             lbl.grid(row=0, column=0, pady=20)
             return
 
         for index, order in enumerate(orders):
-            row_frame = customtkinter.CTkFrame(self.table_scroll, fg_color="#1E293B", corner_radius=6)
+            row_frame = create_card(self.table_scroll, fg_color=BG_SURFACE, corner_radius=8)
             row_frame.grid(row=index, column=0, sticky="ew", pady=3)
             row_frame.grid_columnconfigure(0, weight=1)
             row_frame.grid_columnconfigure(1, weight=0)
 
             left = customtkinter.CTkFrame(row_frame, fg_color="transparent")
-            left.grid(row=0, column=0, sticky="w", padx=12, pady=8)
+            left.grid(row=0, column=0, sticky="w", padx=14, pady=10)
 
-            txt = f"{order.order_id}  |  {order.client}  |  {order.title}"
-            customtkinter.CTkLabel(left, text=txt, font=customtkinter.CTkFont(weight="bold")).pack(anchor="w")
+            txt = f"{order.order_id}  ·  @{order.client}  ·  {order.title}"
+            customtkinter.CTkLabel(left, text=txt, font=font_ui(13, "bold"), text_color=TEXT_PRIMARY).pack(anchor="w")
 
-            warn_tag = "  •  ⚠ API > 5% (Эконом)" if order.is_api_over_threshold else ""
+            warn_tag = "  ·  ⚠ API > 5% (Эконом)" if order.is_api_over_threshold else ""
             sub = (
-                f"{order.kind.upper()}  •  Статус: {order.stage}  •  "
-                f"Комиссия Kwork: {order.kwork_fee_rub:,.0f} ₽  •  "
+                f"{order.kind.upper()}  ·  {order.stage}  ·  "
+                f"Комиссия Kwork: {order.kwork_fee_rub:,.0f} ₽  ·  "
                 f"API: {order.cost_rub:.2f} ₽ (вирт: {order.virtual_cost_rub:.2f} ₽){warn_tag}"
             ).replace(",", " ")
-            customtkinter.CTkLabel(left, text=sub, font=customtkinter.CTkFont(size=11), text_color="#94A3B8").pack(anchor="w")
+            customtkinter.CTkLabel(left, text=sub, font=font_mono(11), text_color=TEXT_SECONDARY).pack(anchor="w", pady=(2, 0))
 
             right = customtkinter.CTkFrame(row_frame, fg_color="transparent")
-            right.grid(row=0, column=1, sticky="e", padx=12, pady=8)
+            right.grid(row=0, column=1, sticky="e", padx=14, pady=10)
 
             margin_str = f"Маржа: {order.net_margin_rub:,.0f} ₽ ({order.price:,.0f} ₽)".replace(",", " ")
             customtkinter.CTkLabel(
                 right,
                 text=margin_str,
-                font=customtkinter.CTkFont(size=13, weight="bold"),
-                text_color="#10B981" if order.net_margin_rub >= 0 else "#EF4444",
+                font=font_mono(13, "bold"),
+                text_color=SUCCESS_FG if order.net_margin_rub >= 0 else DANGER_FG,
             ).pack(side="right", padx=6)
 
     def on_export_csv(self) -> None:
